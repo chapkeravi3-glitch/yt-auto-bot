@@ -16,6 +16,7 @@ import re
 import shutil
 import subprocess
 import time
+import urllib.parse
 
 import requests
 from PIL import Image, ImageDraw, ImageFont, ImageOps, features
@@ -77,7 +78,7 @@ def gemini_json(prompt):
     last = ""
     for model in models:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-        for attempt in range(3):
+        for attempt in range(5):
             try:
                 r = requests.post(
                     url,
@@ -100,7 +101,7 @@ def gemini_json(prompt):
             last = f"{model} {r.status_code}: {r.text[:200]}"
             if r.status_code in (400, 404):
                 break
-            time.sleep(8 * (attempt + 1))
+            time.sleep(10 * (attempt + 1))
         print("Gemini issue:", last)
     raise RuntimeError("Gemini से स्क्रिप्ट नहीं मिली: " + last)
 
@@ -194,6 +195,12 @@ def wrap(draw, text, font, maxw):
     return lines
 
 
+def _img_from_bytes(content):
+    img = Image.open(io.BytesIO(content))
+    img.load()
+    return img.convert("RGB")
+
+
 def pexels_bg(query):
     key = os.environ.get("PEXELS_API_KEY")
     if not key or not query:
@@ -209,11 +216,66 @@ def pexels_bg(query):
         if not photos:
             return None
         url = random.choice(photos)["src"]["portrait"]
-        content = requests.get(url, timeout=60).content
-        return Image.open(io.BytesIO(content)).convert("RGB")
+        return _img_from_bytes(requests.get(url, timeout=60).content)
     except Exception as e:
         print("pexels issue:", e)
         return None
+
+
+def pixabay_bg(query):
+    key = os.environ.get("PIXABAY_API_KEY")
+    if not key or not query:
+        return None
+    try:
+        r = requests.get(
+            "https://pixabay.com/api/",
+            params={"key": key, "q": query[:90], "image_type": "photo",
+                    "orientation": "vertical", "safesearch": "true", "per_page": 20},
+            timeout=30,
+        )
+        hits = r.json().get("hits", [])
+        if not hits:
+            return None
+        url = random.choice(hits).get("largeImageURL") or hits[0]["webformatURL"]
+        return _img_from_bytes(requests.get(url, timeout=60).content)
+    except Exception as e:
+        print("pixabay issue:", e)
+        return None
+
+
+def ai_bg(query):
+    """बिना key वाली AI फ़ोटो (Pollinations). न चले तो None लौटता है।"""
+    if not query:
+        return None
+    prompt = (f"{query}, cinematic, dramatic lighting, vertical poster style, "
+              "no text, no letters, no logos, no real people")
+    url = "https://image.pollinations.ai/prompt/" + urllib.parse.quote(prompt)
+    for attempt in range(2):
+        try:
+            r = requests.get(
+                url,
+                params={"width": 1080, "height": 1920, "nologo": "true",
+                        "seed": random.randint(1, 10**6)},
+                timeout=120,
+            )
+            ctype = r.headers.get("content-type", "")
+            if r.status_code == 200 and ctype.startswith("image") and len(r.content) > 10000:
+                return _img_from_bytes(r.content)
+            print("ai image issue:", r.status_code, ctype)
+        except Exception as e:
+            print("ai image issue:", e)
+        time.sleep(5)
+    return None
+
+
+def get_bg(query):
+    for fn in (pexels_bg, pixabay_bg, ai_bg):
+        img = fn(query)
+        if img is not None:
+            print("  फ़ोटो मिली:", fn.__name__, "|", query)
+            return img
+    print("  फ़ोटो नहीं मिली, रंगीन बैकग्राउंड:", query)
+    return None
 
 
 def gradient_bg():
@@ -223,7 +285,7 @@ def gradient_bg():
 
 
 def make_card(text, query, out):
-    bg = pexels_bg(query) or gradient_bg()
+    bg = get_bg(query) or gradient_bg()
     base = ImageOps.fit(bg, (W, H))
     base = Image.blend(base, Image.new("RGB", (W, H), (0, 0, 0)), 0.5)
     d = ImageDraw.Draw(base)
