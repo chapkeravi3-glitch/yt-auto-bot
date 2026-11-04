@@ -2,11 +2,11 @@ name: Daily Video
 
 on:
   schedule:
-    - cron: "30 11 * * *"   # रोज़ शाम 5:00 बजे (भारतीय समय)
+    - cron: "30 6,12 * * *"   # रोज़ 2 वीडियो: दोपहर 12:00 और शाम 6:00 (भारतीय समय)
   workflow_dispatch:
     inputs:
       dry_run:
-        description: "सिर्फ़ टेस्ट (वीडियो बने, अपलोड न हो)"
+        description: "सिर्फ़ टेस्ट (अपलोड न हो)"
         type: boolean
         default: false
 
@@ -19,19 +19,15 @@ jobs:
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-
       - name: System packages
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg fonts-noto-core libraqm0 libfribidi0
-
       - name: Python packages
         run: pip install -r requirements.txt
-
       - name: Make video and upload
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
@@ -39,10 +35,10 @@ jobs:
           YT_CLIENT_SECRET: ${{ secrets.YT_CLIENT_SECRET }}
           YT_REFRESH_TOKEN: ${{ secrets.YT_REFRESH_TOKEN }}
           PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
+          PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
           DRY_RUN: ${{ inputs.dry_run && '1' || '0' }}
         run: python main.py
-
-      - name: Keep video for 3 days (देखने के लिए)
+      - name: Keep video for 3 days
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -50,7 +46,6 @@ jobs:
           path: work/final.mp4
           retention-days: 3
           if-no-files-found: ignore
-
       - name: Save history
         if: success()
         run: |
