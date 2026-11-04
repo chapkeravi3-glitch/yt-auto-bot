@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-Auto Shorts maker v2
+Auto Shorts maker v2.1
 Gemini (स्क्रिप्ट) -> edge-tts (हिंदी आवाज़) -> असली वीडियो क्लिप + शब्द-दर-शब्द कैप्शन (ffmpeg)
 -> YouTube upload.  GitHub Actions पर बिना स्क्रीन के चलता है।
 
@@ -36,11 +36,11 @@ W, H = 1080, 1920
 FPS = 25
 
 PALETTES = [
-    ((20, 20, 60), (120, 30, 90)),
-    ((10, 40, 60), (20, 120, 110)),
-    ((60, 20, 20), (160, 80, 20)),
-    ((25, 25, 25), (80, 60, 140)),
-    ((5, 30, 20), (40, 110, 60)),
+    ((30, 60, 140), (160, 50, 120)),
+    ((0, 90, 120), (40, 170, 150)),
+    ((140, 40, 40), (230, 130, 40)),
+    ((60, 60, 130), (140, 100, 200)),
+    ((20, 100, 70), (90, 180, 100)),
 ]
 
 PROMPT = """तुम एक यूट्यूब शॉर्ट्स स्क्रिप्ट राइटर हो। चैनल का विषय: {niche}
@@ -357,28 +357,38 @@ def pixabay_photo(query):
         return None
 
 
+_LAST_AI = [0.0]
+
+
 def ai_bg(query):
-    """बिना key वाली AI फ़ोटो (Pollinations). न चले तो None लौटता है।"""
+    """बिना key वाली AI फ़ोटो (Pollinations). मुफ़्त सीमा लगभग 15 सेकंड में 1 फ़ोटो है,
+    इसलिए हर कोशिश के बीच इतना इंतज़ार किया जाता है। न चले तो None लौटता है।"""
     if not query:
         return None
-    prompt = (f"{query}, cinematic, dramatic lighting, vertical poster style, "
-              "no text, no letters, no logos, no real people")
+    gap = float(CFG.get("ai_gap_seconds", 17))
+    prompt = (f"{query}, ultra sharp, high detail, cinematic photo, vivid colors, "
+              "natural light, vertical, no text, no letters, no logos, no real people")
     url = "https://image.pollinations.ai/prompt/" + urllib.parse.quote(prompt)
-    for _ in range(2):
+    for _ in range(3):
+        wait = gap - (time.time() - _LAST_AI[0])
+        if wait > 0:
+            time.sleep(wait)
+        _LAST_AI[0] = time.time()
         try:
             r = requests.get(
                 url,
-                params={"width": 1080, "height": 1920, "nologo": "true",
+                params={"width": 1080, "height": 1920, "model": "flux", "nologo": "true",
                         "seed": random.randint(1, 10**6)},
-                timeout=120,
+                timeout=180,
             )
             ctype = r.headers.get("content-type", "")
             if r.status_code == 200 and ctype.startswith("image") and len(r.content) > 10000:
-                return _img_from_bytes(r.content)
+                img = _img_from_bytes(r.content)
+                if img.size[0] >= 500:
+                    return img
             print("ai image issue:", r.status_code, ctype)
         except Exception as e:
             print("ai image issue:", e)
-        time.sleep(5)
     return None
 
 
@@ -399,7 +409,8 @@ def make_bg_image(query, out):
         print("  फ़ोटो नहीं मिली, रंगीन बैकग्राउंड:", query)
         img = gradient_bg()
     base = ImageOps.fit(img, (W, H))
-    base = Image.blend(base, Image.new("RGB", (W, H), (0, 0, 0)), 0.45)
+    dark = float(CFG.get("image_darkness", 0.2))
+    base = Image.blend(base, Image.new("RGB", (W, H), (0, 0, 0)), dark)
     base.save(out, quality=92)
 
 
@@ -423,7 +434,8 @@ def scene_video(kind, src, audio, out, d, caps, mark):
         inputs += ["-stream_loop", "-1", "-ss", f"{start:.2f}", "-i", str(src)]
         base = (f"[0:v]scale={W}:{H}:force_original_aspect_ratio=increase,"
                 f"crop={W}:{H},setsar=1,fps={FPS},"
-                f"drawbox=x=0:y=0:w=iw:h=ih:color=black@0.30:t=fill,format=yuv420p[bg]")
+                f"drawbox=x=0:y=0:w=iw:h=ih:color=black@{CFG.get('video_darkness', 0.15)}:t=fill,"
+                f"format=yuv420p[bg]")
     else:
         inputs += ["-loop", "1", "-framerate", str(FPS), "-i", str(src)]
         base = (f"[0:v]scale={W * 3 // 2}:{H * 3 // 2},"
