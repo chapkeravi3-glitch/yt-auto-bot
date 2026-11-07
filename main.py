@@ -43,7 +43,33 @@ import requests
 from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps, features
 
 ROOT = pathlib.Path(__file__).resolve().parent
-CFG = json.loads((ROOT / "config.json").read_text(encoding="utf-8"))
+
+
+def load_cfg():
+    """config.json पढ़ता है। आख़िर में फ़ालतू अक्षर (जैसे दो बार }) हों तो उन्हें अनदेखा करता है।
+    असली ग़लती हो तो साफ़ बताता है कि कौन-सी लाइन में है।"""
+    text = (ROOT / "config.json").read_text(encoding="utf-8").lstrip("\ufeff")
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as e:
+        try:
+            obj, end = json.JSONDecoder().raw_decode(text.lstrip())
+            if isinstance(obj, dict):
+                print("चेतावनी: config.json के आख़िर में फ़ालतू अक्षर हैं "
+                      f"(लाइन {e.lineno}), उन्हें अनदेखा किया। फ़ाइल ठीक कर लें।")
+                return obj
+        except Exception:
+            pass
+        lines = text.splitlines()
+        near = lines[e.lineno - 1] if 0 < e.lineno <= len(lines) else ""
+        raise SystemExit(
+            f"config.json में ग़लती है: लाइन {e.lineno}, कॉलम {e.colno} ({e.msg})\n"
+            f"उस लाइन में लिखा है: {near!r}\n"
+            "ध्यान दें: हर लाइन के अंत में कॉमा चाहिए (आख़िरी को छोड़कर) और फ़ाइल के अंत में सिर्फ़ एक }"
+        )
+
+
+CFG = load_cfg()
 WORK = ROOT / "work"
 HIST = ROOT / "state" / "history.json"
 W, H = 1080, 1920
