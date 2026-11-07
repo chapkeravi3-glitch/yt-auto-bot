@@ -1,32 +1,46 @@
 # -*- coding: utf-8 -*-
 """
-Auto Shorts maker v2.1
-Gemini (स्क्रिप्ट) -> edge-tts (हिंदी आवाज़) -> असली वीडियो क्लिप + शब्द-दर-शब्द कैप्शन (ffmpeg)
--> YouTube upload.  GitHub Actions पर बिना स्क्रीन के चलता है।
+Auto Shorts maker v3
+====================
+आज की असली ख़बरें/ट्रेंड (Google News + Google Trends, बिना key)
+  -> Gemini (एक ही कॉल: स्क्रिप्ट + हर सीन के लिए सटीक खोज-शब्द)
+  -> edge-tts (हिंदी आवाज़) + शब्द-दर-शब्द चमकते कैप्शन + शुरू में बड़ा हुक-टेक्स्ट
+  -> हर सीन के लिए असली फ़ुटेज/फ़ोटो:
+       "photo" सीन : Wikimedia Commons (मुफ़्त-लाइसेंस वाली असली फ़ोटो) -> Pexels फ़ोटो
+       "stock" सीन : Pexels वीडियो -> Pixabay वीडियो
+     सिर्फ़ वही क्लिप ली जाती है जिसके शीर्षक/टैग में खोज-शब्द मिलें।
+  -> गुणवत्ता की शर्त: ज़्यादातर सीन में सही फ़ुटेज न मिले तो वीडियो अपलोड नहीं होता।
+  -> YouTube upload.  GitHub Actions पर बिना स्क्रीन के चलता है।
 
-बैकग्राउंड का क्रम (हर सीन के लिए):
-  1) Pixabay वीडियो क्लिप  (अगर PIXABAY_API_KEY है)
-  2) रिपॉज़िटरी के clips/ फ़ोल्डर की अपनी वीडियो क्लिप (.mp4)
-  3) फ़ोटो (Pexels / Pixabay फ़ोटो / AI फ़ोटो)
-  4) रंगीन बैकग्राउंड
-बैकग्राउंड म्यूज़िक: रिपॉज़िटरी के music/ फ़ोल्डर में रखी फ़ाइल (.mp3), अपने-आप धीमी आवाज़ में चलेगी।
+AI से बनी धुंधली फ़ोटो अब बिल्कुल इस्तेमाल नहीं होतीं।
+
+config.json की नई वैकल्पिक चाबियाँ (न दें तो डिफ़ॉल्ट चलेंगे):
+  "news_query":        ख़बरें खोजने का शब्द, जैसे "बॉलीवुड" (न दें तो niche का शुरुआती हिस्सा)
+  "region":            "IN"
+  "scenes":            सीन की संख्या (डिफ़ॉल्ट 12)
+  "min_visual_ratio":  0.7  (इतने प्रतिशत सीन में सही फ़ुटेज न मिले तो अपलोड नहीं)
+  "low_quality_action": "skip" या "private"  (डिफ़ॉल्ट skip)
+  "use_local_clips":   false  (true करने पर clips/ फ़ोल्डर की क्लिप आख़िरी विकल्प में आएँगी)
 """
 import asyncio
 import datetime
 import glob
+import html
 import io
 import json
+import math
 import os
 import pathlib
 import random
 import re
 import shutil
 import subprocess
+import sys
 import time
-import urllib.parse
+import xml.etree.ElementTree as ET
 
 import requests
-from PIL import Image, ImageDraw, ImageFont, ImageOps, features
+from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps, features
 
 ROOT = pathlib.Path(__file__).resolve().parent
 CFG = json.loads((ROOT / "config.json").read_text(encoding="utf-8"))
@@ -34,6 +48,15 @@ WORK = ROOT / "work"
 HIST = ROOT / "state" / "history.json"
 W, H = 1080, 1920
 FPS = 25
+UA = {"User-Agent": "Mozilla/5.0 (compatible; AutoShortsBot/3.0)"}
+
+DEFAULT_MODELS = [
+    "gemini-2.5-flash",
+    "gemini-2.5-flash-lite",
+    "gemini-2.0-flash",
+    "gemini-flash-latest",
+    "gemini-flash-lite-latest",
+]
 
 PALETTES = [
     ((30, 60, 140), (160, 50, 120)),
@@ -43,26 +66,49 @@ PALETTES = [
     ((20, 100, 70), (90, 180, 100)),
 ]
 
-PROMPT = """तुम एक यूट्यूब शॉर्ट्स स्क्रिप्ट राइटर हो। चैनल का विषय: {niche}
+JSON_SHAPE = (
+    '{"title": "...", "hook": "...", "description": "...", "tags": ["..."], '
+    '"scenes": [{"text": "...", "kind": "photo", "queries": ["...", "..."]}]}'
+)
 
-एक नए शॉर्ट वीडियो (लगभग 35-50 सेकंड) की स्क्रिप्ट बनाओ।
-नियम:
+COMMON_RULES = """
+सख़्त नियम:
 - भाषा: सरल बोलचाल की हिंदी (देवनागरी)।
-- सिर्फ़ ऐसे फ़ैक्ट्स जो पक्के, जाँचे हुए और सही हों। अंदाज़े, अफ़वाह, विवाद, किसी की निजी ज़िंदगी या बदनामी वाली बातें नहीं। जो बात पक्की न हो, उसे मत लिखो।
-- पहला सीन छोटा (6-10 शब्द) और ज़बरदस्त हुक हो: चौंकाने वाली बात या सवाल, ताकि पहले 2 सेकंड में ही दर्शक रुक जाए।
-- कुल {n} सीन। बाकी हर सीन का text 8 से 16 शब्द का, बोलने में सहज, छोटे वाक्य। तेज़ रफ़्तार रखो।
-- कहानी की तरह आगे बढ़ाओ: हुक, फिर मज़ेदार तथ्य, और आख़िर में एक चौंकाने वाला मोड़।
-- आख़िरी सीन में छोटी सी अपील: ऐसे और फ़ैक्ट्स के लिए चैनल सब्सक्राइब करें।
-- हर सीन के लिए image_query अंग्रेज़ी में 2-3 शब्द, ऐसी चलती फ़ुटेज के लिए जो स्टॉक वीडियो साइट पर मिल जाए (जैसे "cinema theatre", "film camera", "city night", "crowd applause"), किसी असली व्यक्ति, फ़िल्म या ब्रांड का नाम नहीं।
-- ये टॉपिक/टाइटल पहले बन चुके हैं, इनसे अलग नया विषय चुनो:
+- अपनी तरफ़ से कोई नई बात, आँकड़ा, तारीख़ या बयान मत गढ़ो। अफ़वाह, विवाद, किसी की निजी ज़िंदगी या बदनामी वाली बात नहीं। जो पक्का न हो उसे "रिपोर्ट्स के मुताबिक" कहो या छोड़ दो।
+- "hook": स्क्रीन पर बड़ा लिखा जाने वाला 3-6 शब्दों का चौंकाने वाला वाक्य (जैसे "ये क्या हो गया?!").
+- पहले सीन का text ज़बरदस्त हुक हो (6-10 शब्द): चौंकाने वाली बात या सवाल, ताकि पहले 2 सेकंड में दर्शक रुक जाए।
+- कुल {n} सीन। बाकी हर सीन 6 से 12 शब्द का, छोटे वाक्य, तेज़ रफ़्तार, हर सीन में सिर्फ़ एक नई बात।
+- बीच में एक सस्पेंस/सवाल रखो ताकि दर्शक रुका रहे। आख़िर में चौंकाने वाला मोड़ और छोटी अपील (सब्सक्राइब)। आख़िरी लाइन ऐसी हो कि वीडियो दोबारा शुरू से देखने का मन करे।
+- हर सीन के लिए "kind" चुनो:
+  * "photo": जब बात किसी ख़ास व्यक्ति, जगह, फ़िल्म, घटना या चीज़ की हो। queries में उसका सही अंग्रेज़ी नाम लिखो (जैसे "Shah Rukh Khan", "Taj Mahal").
+  * "stock": जब आम माहौल दिखाना हो। queries में चलती फ़ुटेज के 2-3 अंग्रेज़ी शब्द (जैसे "crowd applause", "city night", "film camera").
+- हर सीन के "queries" में 2-3 अंग्रेज़ी विकल्प हों: पहला सबसे सटीक, बाद वाले ज़्यादा आम।
+- title हिंदी में, 70 अक्षरों तक, जिज्ञासा जगाने वाला। description 2-3 लाइन। tags 8-12 (हिंदी और अंग्रेज़ी मिलाकर)।
+- ये टाइटल पहले बन चुके हैं, इनसे अलग नई कहानी चुनो:
 {recent}
 
 सिर्फ़ यह JSON लौटाओ:
-{{"title": "...", "description": "...", "tags": ["..."], "scenes": [{{"text": "...", "image_query": "..."}}]}}
-title हिंदी में, 70 अक्षरों तक, आकर्षक। description 2-3 लाइन। tags 8-12 (हिंदी और अंग्रेज़ी मिलाकर)।"""
+""" + JSON_SHAPE.replace("{", "{{").replace("}", "}}")  # .format() के लिए कोष्ठक दोहरे
+
+PROMPT_NEWS = """तुम एक यूट्यूब शॉर्ट्स स्क्रिप्ट राइटर हो। चैनल का विषय: {niche}
+
+नीचे आज की असली ख़बरें/ट्रेंड हैं:
+{headlines}
+
+इनमें से चैनल के विषय से जुड़ी सबसे दिलचस्प और ताज़ा एक कहानी चुनो और उस पर लगभग 35-50 सेकंड का शॉर्ट वीडियो बनाओ। सिर्फ़ वही बातें लिखो जो इन ख़बरों में साफ़ लिखी हैं या जो पक्का और सर्वमान्य तथ्य हैं।
+""" + COMMON_RULES
+
+PROMPT_EVERGREEN = """तुम एक यूट्यूब शॉर्ट्स स्क्रिप्ट राइटर हो। चैनल का विषय: {niche}
+
+आज की ख़बरें नहीं मिल सकीं। इसलिए चैनल के विषय पर एक मशहूर, पक्का और जाँचा हुआ रोचक तथ्य चुनो और उस पर लगभग 35-50 सेकंड का शॉर्ट वीडियो बनाओ।
+""" + COMMON_RULES
 
 
-# ---------------------------------------------------------------- history
+class GeminiDown(Exception):
+    """सब मॉडल व्यस्त/कोटा ख़त्म: आज वीडियो छोड़ना है, जॉब लाल नहीं होना चाहिए।"""
+
+
+# ---------------------------------------------------------------- history / summary
 def load_hist():
     try:
         return json.loads(HIST.read_text(encoding="utf-8"))
@@ -75,10 +121,91 @@ def save_hist(items):
     HIST.write_text(json.dumps(items[-300:], ensure_ascii=False, indent=1), encoding="utf-8")
 
 
+def summary(text):
+    """GitHub Actions के रन-पन्ने पर साफ़ संदेश दिखाता है।"""
+    print(text)
+    path = os.environ.get("GITHUB_STEP_SUMMARY")
+    if path:
+        try:
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(text + "\n\n")
+        except Exception:
+            pass
+
+
+# ---------------------------------------------------------------- ख़बरें / ट्रेंड
+def _rss_items(url):
+    r = requests.get(url, headers=UA, timeout=25)
+    r.raise_for_status()
+    root = ET.fromstring(r.content)
+    out = []
+    for it in root.iter("item"):
+        title = (it.findtext("title") or "").strip()
+        desc = re.sub(r"<[^>]+>", " ", html.unescape(it.findtext("description") or ""))
+        desc = re.sub(r"\s+", " ", desc).strip()
+        if title:
+            out.append((title, desc))
+    return out
+
+
+def fetch_headlines():
+    """Google News (हिंदी) और Google Trends से आज की ख़बरों की सूची। न मिले तो ख़ाली सूची।"""
+    region = CFG.get("region", "IN")
+    q = (CFG.get("news_query") or CFG.get("niche", "")).strip()
+    q = re.sub(r"\s+", " ", q)[:60]
+    lines, seen = [], set()
+
+    def add(title, desc, tag):
+        key = re.sub(r"\W+", "", title.lower())[:40]
+        if key in seen:
+            return
+        seen.add(key)
+        line = f"- [{tag}] {title}"
+        if desc and desc.lower() not in title.lower():
+            line += f" :: {desc[:160]}"
+        lines.append(line)
+
+    try:
+        url = ("https://news.google.com/rss/search?q=" + requests.utils.quote(q + " when:2d")
+               + f"&hl=hi&gl={region}&ceid={region}:hi")
+        for t, d in _rss_items(url)[:14]:
+            add(t, d, "ख़बर")
+    except Exception as e:
+        print("news issue:", e)
+    try:
+        for t, d in _rss_items(f"https://trends.google.com/trending/rss?geo={region}")[:12]:
+            add(t, d, "ट्रेंड")
+    except Exception as e:
+        print("trends issue:", e)
+    print(f"ख़बरें मिलीं: {len(lines)}")
+    return lines[:26]
+
+
 # ---------------------------------------------------------------- gemini
+def _parse_json(txt):
+    txt = re.sub(r"^```(?:json)?|```$", "", (txt or "").strip(), flags=re.M).strip()
+    try:
+        return json.loads(txt)
+    except Exception:
+        m = re.search(r"\{.*\}", txt, re.S)
+        if m:
+            return json.loads(m.group(0))
+        raise
+
+
+def _retry_delay(text):
+    m = re.search(r'"retryDelay":\s*"(\d+(?:\.\d+)?)s"', text or "")
+    return float(m.group(1)) if m else 0.0
+
+
 def gemini_json(prompt):
-    key = os.environ["GEMINI_API_KEY"]
-    models = CFG.get("gemini_models", ["gemini-2.5-flash", "gemini-flash-latest"])
+    key = os.environ.get("GEMINI_API_KEY", "")
+    if not key:
+        raise GeminiDown("GEMINI_API_KEY नहीं मिली")
+    models = list(CFG.get("gemini_models") or [])
+    for m in DEFAULT_MODELS:  # हर मॉडल का कोटा अलग होता है, इसलिए सब बारी-बारी से
+        if m not in models:
+            models.append(m)
     body = {
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {"temperature": 1.0, "responseMimeType": "application/json"},
@@ -86,42 +213,82 @@ def gemini_json(prompt):
     last = ""
     for model in models:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-        for attempt in range(5):
+        for attempt in range(3):
             try:
                 r = requests.post(
-                    url,
-                    headers={"x-goog-api-key": key, "Content-Type": "application/json"},
-                    json=body,
-                    timeout=120,
+                    url, headers={"x-goog-api-key": key, "Content-Type": "application/json"},
+                    json=body, timeout=120,
                 )
             except Exception as e:
-                last = str(e)
-                time.sleep(5)
+                last = f"{model}: {e}"
+                time.sleep(4)
                 continue
             if r.status_code == 200:
                 try:
                     txt = r.json()["candidates"][0]["content"]["parts"][0]["text"]
-                    txt = re.sub(r"^```(?:json)?|```$", "", txt.strip(), flags=re.M).strip()
-                    return json.loads(txt)
+                    return _parse_json(txt)
                 except Exception as e:
-                    last = f"parse error: {e}"
+                    last = f"{model} parse error: {e}"
                     continue
-            last = f"{model} {r.status_code}: {r.text[:200]}"
+            last = f"{model} {r.status_code}: {r.text[:160]}"
+            print("Gemini issue:", last)
             if r.status_code in (400, 404):
                 break
-            time.sleep(10 * (attempt + 1))
-        print("Gemini issue:", last)
-    raise RuntimeError("Gemini से स्क्रिप्ट नहीं मिली: " + last)
+            if r.status_code == 429:
+                delay = _retry_delay(r.text)
+                # रोज़ का कोटा ख़त्म हो तो रुकने का फ़ायदा नहीं: अगला मॉडल
+                if attempt == 0 and 0 < delay <= 25 and "PerDay" not in r.text:
+                    time.sleep(delay + 1)
+                    continue
+                break
+            time.sleep(6 * (attempt + 1))  # 500/503: थोड़ा रुककर
+    raise GeminiDown("Gemini से स्क्रिप्ट नहीं मिली: " + last)
+
+
+def pollinations_json(prompt):
+    """Gemini न चले तो मुफ़्त बैकअप (बिना key)।"""
+    r = requests.post(
+        "https://text.pollinations.ai/",
+        json={"messages": [{"role": "user", "content": prompt}], "model": "openai",
+              "jsonMode": True},
+        headers=UA, timeout=120,
+    )
+    r.raise_for_status()
+    return _parse_json(r.text)
 
 
 def make_script(hist):
-    n = int(CFG.get("scenes", 8))
+    n = int(CFG.get("scenes", 12))
     recent = "\n".join("- " + h["title"] for h in hist[-40:]) or "(अभी कोई नहीं)"
-    data = gemini_json(PROMPT.format(niche=CFG["niche"], n=n, recent=recent))
-    scenes = [s for s in data.get("scenes", []) if str(s.get("text", "")).strip()]
-    if len(scenes) < 4:
+    heads = fetch_headlines()
+    if heads:
+        prompt = PROMPT_NEWS.format(niche=CFG["niche"], headlines="\n".join(heads),
+                                    n=n, recent=recent)
+    else:
+        prompt = PROMPT_EVERGREEN.format(niche=CFG["niche"], n=n, recent=recent)
+
+    try:
+        data = gemini_json(prompt)
+    except GeminiDown as e:
+        print(str(e))
+        print("बैकअप AI (Pollinations) आज़मा रहे हैं...")
+        try:
+            data = pollinations_json(prompt)
+        except Exception as e2:
+            raise GeminiDown(str(e) + " | बैकअप भी नहीं चला: " + str(e2)[:120])
+
+    scenes = []
+    for s in data.get("scenes", []):
+        text = str(s.get("text", "")).strip()
+        if not text:
+            continue
+        qs = s.get("queries") or ([s["image_query"]] if s.get("image_query") else [])
+        qs = [str(q).strip() for q in qs if str(q).strip()][:3]
+        kind = "photo" if str(s.get("kind", "")).lower() == "photo" else "stock"
+        scenes.append({"text": text, "kind": kind, "queries": qs})
+    if len(scenes) < 5:
         raise RuntimeError("स्क्रिप्ट में सीन बहुत कम हैं")
-    data["scenes"] = scenes[:12]
+    data["scenes"] = scenes[:16]
     return data
 
 
@@ -242,7 +409,7 @@ def caption_images(words, idx):
             img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
             d = ImageDraw.Draw(img)
             x = (W - total) / 2
-            y = int(H * 0.60)
+            y = int(H * 0.62)
             for k, wd in zip(chunk, widths):
                 color = (255, 221, 0, 255) if k == active else (255, 255, 255, 255)
                 d.text((x, y), words[k][2], font=font, fill=color,
@@ -252,6 +419,46 @@ def caption_images(words, idx):
             img.save(path)
             result.append((path, words[active][0], words[active][1]))
     return result
+
+
+def hook_image(text):
+    """पहले ढाई सेकंड स्क्रीन के ऊपर दिखने वाला बड़ा हुक-टेक्स्ट।"""
+    text = (text or "").strip()
+    if not text:
+        return None
+    words = text.split()
+    size = 120
+    while True:
+        font = load_font(size)
+        probe = ImageDraw.Draw(Image.new("RGBA", (10, 10)))
+        lines, cur = [], ""
+        for w in words:
+            trial = (cur + " " + w).strip()
+            if cur and probe.textlength(trial, font=font) > W - 140:
+                lines.append(cur)
+                cur = w
+            else:
+                cur = trial
+        lines.append(cur)
+        if len(lines) <= 3 or size <= 64:
+            break
+        size -= 8
+    img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    lh = int(size * 1.35)
+    y = int(H * 0.20)
+    pad = 36
+    box_h = lh * len(lines) + pad
+    d.rounded_rectangle([50, y - pad, W - 50, y - pad + box_h + pad],
+                        radius=36, fill=(0, 0, 0, 150))
+    for ln in lines:
+        tw = d.textlength(ln, font=font)
+        d.text(((W - tw) / 2, y), ln, font=font, fill=(255, 221, 0, 255),
+               stroke_width=7, stroke_fill=(0, 0, 0, 255))
+        y += lh
+    path = WORK / "hook.png"
+    img.save(path)
+    return path
 
 
 def watermark_image():
@@ -269,26 +476,84 @@ def watermark_image():
     return path
 
 
-# ---------------------------------------------------------------- backgrounds
+# ---------------------------------------------------------------- फ़ुटेज/फ़ोटो खोज
+STOP = set("a an the of in on at to for and with from by video footage shot view".split())
+USED = set()
+
+
+def qwords(q):
+    return [w for w in re.findall(r"[a-z0-9]+", (q or "").lower()) if len(w) > 2 and w not in STOP]
+
+
+def match_score(words, text):
+    t = (text or "").lower()
+    return sum(1 for w in words if w in t)
+
+
+def _download(url, min_bytes=40_000, max_bytes=45_000_000, headers=None):
+    for _ in range(2):
+        try:
+            r = requests.get(url, timeout=180, headers=headers or UA, stream=True)
+            r.raise_for_status()
+            data = b""
+            for chunk in r.iter_content(1 << 20):
+                data += chunk
+                if len(data) > max_bytes:
+                    return None
+            if len(data) >= min_bytes:
+                return data
+        except Exception as e:
+            print("download issue:", str(e)[:100])
+            time.sleep(2)
+    return None
+
+
 def _img_from_bytes(content):
     img = Image.open(io.BytesIO(content))
     img.load()
     return img.convert("RGB")
 
 
-def pixabay_video(query):
+def pexels_videos(query):
+    key = os.environ.get("PEXELS_API_KEY")
+    if not key or not query:
+        return []
+    out = []
+    try:
+        r = requests.get(
+            "https://api.pexels.com/videos/search",
+            headers={"Authorization": key},
+            params={"query": query, "orientation": "portrait", "per_page": 15},
+            timeout=30,
+        )
+        for v in r.json().get("videos", []):
+            files = [f for f in v.get("video_files", [])
+                     if f.get("file_type") == "video/mp4" and f.get("width") and f.get("height")]
+            portrait = [f for f in files if f["height"] >= f["width"] and f["width"] >= 540]
+            pool = portrait or [f for f in files if f["width"] >= 1280]
+            if not pool:
+                continue
+            best = max(pool, key=lambda f: min(f["width"], 1080))
+            slug = (v.get("url", "").rstrip("/").split("/")[-1]).replace("-", " ")
+            out.append({"id": f"pexels{v.get('id')}", "url": best["link"],
+                        "dur": float(v.get("duration") or 0), "text": slug})
+    except Exception as e:
+        print("pexels video issue:", e)
+    return out
+
+
+def pixabay_videos(query):
     key = os.environ.get("PIXABAY_API_KEY")
     if not key or not query:
-        return None
+        return []
+    out = []
     try:
         r = requests.get(
             "https://pixabay.com/api/videos/",
             params={"key": key, "q": query[:90], "per_page": 20, "safesearch": "true"},
             timeout=30,
         )
-        hits = r.json().get("hits", [])
-        random.shuffle(hits)
-        for h in hits[:6]:
+        for h in r.json().get("hits", []):
             vids = h.get("videos", {})
             url = None
             for size in ("large", "medium", "small"):
@@ -296,28 +561,103 @@ def pixabay_video(query):
                 if v.get("url") and (v.get("size") or 0) < 45_000_000:
                     url = v["url"]
                     break
-            if not url:
-                continue
-            data = requests.get(url, timeout=180).content
-            if len(data) > 50_000:
-                p = WORK / f"clip_{random.randint(1, 10**9)}.mp4"
-                p.write_bytes(data)
-                return p
+            if url:
+                out.append({"id": f"pixabay{h.get('id')}", "url": url,
+                            "dur": float(h.get("duration") or 0), "text": h.get("tags", "")})
     except Exception as e:
         print("pixabay video issue:", e)
+    return out
+
+
+def pick_video(queries):
+    """सिर्फ़ वही क्लिप जिसके शीर्षक/टैग में खोज-शब्द मिलें। लौटाता है (path, query) या None।"""
+    for q in queries:
+        words = qwords(q)
+        if not words:
+            continue
+        cands = [c for c in pexels_videos(q) + pixabay_videos(q)
+                 if c["dur"] >= 4 and c["id"] not in USED]
+        for c in cands:
+            c["score"] = match_score(words, c["text"])
+        good = [c for c in cands if c["score"] >= 1]
+        if not good:
+            continue
+        top = max(c["score"] for c in good)
+        order = [c for c in good if c["score"] == top]
+        random.shuffle(order)
+        for c in order[:3]:
+            data = _download(c["url"], min_bytes=80_000)
+            if data:
+                p = WORK / f"clip_{random.randint(1, 10**9)}.mp4"
+                p.write_bytes(data)
+                USED.add(c["id"])
+                return p, q
     return None
 
 
-def local_clip():
-    files = []
-    for ext in ("mp4", "mov", "webm", "mkv"):
-        files += glob.glob(str(ROOT / "clips" / f"*.{ext}"))
-    return pathlib.Path(random.choice(files)) if files else None
+def _license_ok(lic):
+    low = re.sub(r"[-_]", " ", (lic or "").lower())
+    if re.search(r"\b(nc|nd)\b", low):
+        return False
+    return bool(re.search(r"cc by|cc0|public domain|^pd\b", low))
 
 
-def pexels_bg(query):
+def commons_photo(query):
+    """Wikimedia Commons की मुफ़्त-लाइसेंस वाली असली फ़ोटो। लौटाता है (img, credit) या None।"""
+    words = qwords(query)
+    if not words:
+        return None
+    need = max(1, math.ceil(len(words) * 0.6))
+    params = {
+        "action": "query", "format": "json", "generator": "search",
+        "gsrsearch": f"{query} filetype:bitmap", "gsrnamespace": 6, "gsrlimit": 20,
+        "prop": "imageinfo", "iiprop": "url|mime|size|extmetadata", "iiurlwidth": 1600,
+    }
+    try:
+        r = requests.get("https://commons.wikimedia.org/w/api.php", params=params,
+                         headers=UA, timeout=30)
+        pages = r.json().get("query", {}).get("pages", {})
+    except Exception as e:
+        print("commons issue:", e)
+        return None
+    cands = []
+    for page in pages.values():
+        info = (page.get("imageinfo") or [{}])[0]
+        if info.get("mime") not in ("image/jpeg", "image/png"):
+            continue
+        if min(info.get("width", 0), info.get("height", 0)) < 700:
+            continue
+        meta = info.get("extmetadata") or {}
+        lic = (meta.get("LicenseShortName") or {}).get("value", "")
+        if not _license_ok(lic):
+            continue
+        desc = re.sub(r"<[^>]+>", " ", (meta.get("ImageDescription") or {}).get("value", ""))
+        title = page.get("title", "").replace("File:", "")
+        sc = match_score(words, f"{title} {desc}")
+        if sc < need:
+            continue
+        url = info.get("thumburl") or info.get("url")
+        if url and url not in USED:
+            artist = re.sub(r"<[^>]+>", "", (meta.get("Artist") or {}).get("value", "")).strip()
+            cands.append((sc, url, f"{title} - {artist or 'Wikimedia Commons'} ({lic})"))
+    cands.sort(key=lambda x: -x[0])
+    for _, url, credit in cands[:4]:
+        data = _download(url, min_bytes=20_000)
+        if not data:
+            continue
+        try:
+            img = _img_from_bytes(data)
+        except Exception:
+            continue
+        USED.add(url)
+        return img, credit[:200]
+    return None
+
+
+def pexels_photo(query):
     key = os.environ.get("PEXELS_API_KEY")
-    if not key or not query:
+    words = qwords(query)
+    if not key or not words:
         return None
     try:
         r = requests.get(
@@ -326,70 +666,34 @@ def pexels_bg(query):
             params={"query": query, "orientation": "portrait", "per_page": 15},
             timeout=30,
         )
-        photos = r.json().get("photos", [])
-        if not photos:
-            return None
-        url = random.choice(photos)["src"]["portrait"]
-        return _img_from_bytes(requests.get(url, timeout=60).content)
+        photos = [p for p in r.json().get("photos", [])
+                  if match_score(words, p.get("alt", "")) >= 1 and p["id"] not in USED]
+        random.shuffle(photos)
+        for p in photos[:3]:
+            data = _download(p["src"]["portrait"], min_bytes=20_000)
+            if data:
+                USED.add(p["id"])
+                return _img_from_bytes(data)
     except Exception as e:
-        print("pexels issue:", e)
-        return None
-
-
-def pixabay_photo(query):
-    key = os.environ.get("PIXABAY_API_KEY")
-    if not key or not query:
-        return None
-    try:
-        r = requests.get(
-            "https://pixabay.com/api/",
-            params={"key": key, "q": query[:90], "image_type": "photo",
-                    "orientation": "vertical", "safesearch": "true", "per_page": 20},
-            timeout=30,
-        )
-        hits = r.json().get("hits", [])
-        if not hits:
-            return None
-        url = random.choice(hits).get("largeImageURL") or hits[0]["webformatURL"]
-        return _img_from_bytes(requests.get(url, timeout=60).content)
-    except Exception as e:
-        print("pixabay photo issue:", e)
-        return None
-
-
-_LAST_AI = [0.0]
-
-
-def ai_bg(query):
-    """बिना key वाली AI फ़ोटो (Pollinations). मुफ़्त सीमा लगभग 15 सेकंड में 1 फ़ोटो है,
-    इसलिए हर कोशिश के बीच इतना इंतज़ार किया जाता है। न चले तो None लौटता है।"""
-    if not query:
-        return None
-    gap = float(CFG.get("ai_gap_seconds", 17))
-    prompt = (f"{query}, ultra sharp, high detail, cinematic photo, vivid colors, "
-              "natural light, vertical, no text, no letters, no logos, no real people")
-    url = "https://image.pollinations.ai/prompt/" + urllib.parse.quote(prompt)
-    for _ in range(3):
-        wait = gap - (time.time() - _LAST_AI[0])
-        if wait > 0:
-            time.sleep(wait)
-        _LAST_AI[0] = time.time()
-        try:
-            r = requests.get(
-                url,
-                params={"width": 1080, "height": 1920, "model": "flux", "nologo": "true",
-                        "seed": random.randint(1, 10**6)},
-                timeout=180,
-            )
-            ctype = r.headers.get("content-type", "")
-            if r.status_code == 200 and ctype.startswith("image") and len(r.content) > 10000:
-                img = _img_from_bytes(r.content)
-                if img.size[0] >= 500:
-                    return img
-            print("ai image issue:", r.status_code, ctype)
-        except Exception as e:
-            print("ai image issue:", e)
+        print("pexels photo issue:", e)
     return None
+
+
+def compose_photo(img):
+    """धुंधली पृष्ठभूमि + बीच में साफ़ पूरी फ़ोटो (कैप्शन के लिए नीचे जगह छोड़कर)।"""
+    bg = ImageOps.fit(img, (W, H)).filter(ImageFilter.GaussianBlur(32))
+    bg = Image.blend(bg, Image.new("RGB", (W, H), (0, 0, 0)), 0.45)
+    iw, ih = img.size
+    if ih / iw >= 1.5:  # पहले से खड़ी (portrait) फ़ोटो: पूरी स्क्रीन भर दें
+        return Image.blend(ImageOps.fit(img, (W, H)),
+                           Image.new("RGB", (W, H), (0, 0, 0)), 0.12)
+    area_h = int(H * 0.50)
+    scale = min(W / iw, area_h / ih)
+    fg = img.resize((max(1, int(iw * scale)), max(1, int(ih * scale))), Image.LANCZOS)
+    x = (W - fg.size[0]) // 2
+    y = int(H * 0.10) + (area_h - fg.size[1]) // 2
+    bg.paste(fg, (x, y))
+    return bg
 
 
 def gradient_bg():
@@ -398,20 +702,60 @@ def gradient_bg():
     return ImageOps.colorize(g, c1, c2).convert("RGB")
 
 
-def make_bg_image(query, out):
-    img = None
-    for fn in (pexels_bg, pixabay_photo, ai_bg):
-        img = fn(query)
-        if img is not None:
-            print("  फ़ोटो मिली:", fn.__name__, "|", query)
-            break
-    if img is None:
-        print("  फ़ोटो नहीं मिली, रंगीन बैकग्राउंड:", query)
-        img = gradient_bg()
-    base = ImageOps.fit(img, (W, H))
-    dark = float(CFG.get("image_darkness", 0.2))
-    base = Image.blend(base, Image.new("RGB", (W, H), (0, 0, 0)), dark)
-    base.save(out, quality=92)
+def local_clip():
+    if not CFG.get("use_local_clips", False):
+        return None
+    files = []
+    for ext in ("mp4", "mov", "webm", "mkv"):
+        files += glob.glob(str(ROOT / "clips" / f"*.{ext}"))
+    return pathlib.Path(random.choice(files)) if files else None
+
+
+def get_visual(scene, idx):
+    """सीन के लिए सबसे सही फ़ुटेज/फ़ोटो। लौटाता है (kind, src, ok, credit)।
+    ok=False मतलब सही फ़ुटेज नहीं मिली और सादा रंगीन बैकग्राउंड लगा।"""
+    queries = scene.get("queries") or []
+    kind = scene.get("kind", "stock")
+
+    def photo_path(img):
+        p = WORK / f"bg{idx}.jpg"
+        compose_photo(img).save(p, quality=92)
+        return p
+
+    if kind == "photo":
+        for q in queries:
+            got = commons_photo(q)
+            if got:
+                print(f"  असली फ़ोटो (Commons) | {q}")
+                return "image", photo_path(got[0]), True, got[1]
+        got = pick_video(queries)
+        if got:
+            print(f"  वीडियो क्लिप | {got[1]}")
+            return "video", got[0], True, None
+        for q in queries:
+            img = pexels_photo(q)
+            if img is not None:
+                print(f"  फ़ोटो (Pexels) | {q}")
+                return "image", photo_path(img), True, None
+    else:
+        got = pick_video(queries)
+        if got:
+            print(f"  वीडियो क्लिप | {got[1]}")
+            return "video", got[0], True, None
+        for q in queries:
+            img = pexels_photo(q)
+            if img is not None:
+                print(f"  फ़ोटो (Pexels) | {q}")
+                return "image", photo_path(img), True, None
+
+    clip = local_clip()
+    if clip:
+        print("  अपनी क्लिप (clips/ फ़ोल्डर)")
+        return "video", clip, False, None
+    print(f"  सही फ़ुटेज नहीं मिली, रंगीन बैकग्राउंड | {queries[:1]}")
+    p = WORK / f"bg{idx}.jpg"
+    gradient_bg().save(p, quality=92)
+    return "image", p, False, None
 
 
 # ---------------------------------------------------------------- video
@@ -422,9 +766,11 @@ def run(cmd):
         raise RuntimeError("ffmpeg में दिक्कत आई")
 
 
-def scene_video(kind, src, audio, out, d, caps, mark):
+def scene_video(kind, src, audio, out, d, overlays, mark):
+    """overlays = [(png, शुरू, ख़त्म)] : हुक + कैप्शन। mark = वॉटरमार्क png या None।"""
     total = d + 0.35
     inputs = []
+    grade = "eq=contrast=1.06:saturation=1.15"
     if kind == "video":
         try:
             cd = duration(src)
@@ -433,28 +779,28 @@ def scene_video(kind, src, audio, out, d, caps, mark):
         start = random.uniform(0, cd - total - 0.5) if cd > total + 1 else 0
         inputs += ["-stream_loop", "-1", "-ss", f"{start:.2f}", "-i", str(src)]
         base = (f"[0:v]scale={W}:{H}:force_original_aspect_ratio=increase,"
-                f"crop={W}:{H},setsar=1,fps={FPS},"
-                f"drawbox=x=0:y=0:w=iw:h=ih:color=black@{CFG.get('video_darkness', 0.15)}:t=fill,"
+                f"crop={W}:{H},setsar=1,fps={FPS},{grade},"
+                f"drawbox=x=0:y=0:w=iw:h=ih:color=black@{CFG.get('video_darkness', 0.12)}:t=fill,"
                 f"format=yuv420p[bg]")
     else:
         inputs += ["-loop", "1", "-framerate", str(FPS), "-i", str(src)]
         base = (f"[0:v]scale={W * 3 // 2}:{H * 3 // 2},"
-                f"zoompan=z='min(1+0.0006*on,1.12)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
-                f":d=1:s={W}x{H}:fps={FPS},format=yuv420p[bg]")
+                f"zoompan=z='min(1+0.0008*on,1.15)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
+                f":d=1:s={W}x{H}:fps={FPS},{grade},format=yuv420p[bg]")
     inputs += ["-i", str(audio)]
-    for c, _, _ in caps:
+    for c, _, _ in overlays:
         inputs += ["-i", str(c)]
     if mark:
         inputs += ["-i", str(mark)]
 
     fc = [base]
     cur = "bg"
-    for i, (_, t0, t1) in enumerate(caps):
+    for i, (_, t0, t1) in enumerate(overlays):
         nxt = f"v{i}"
         fc.append(f"[{cur}][{2 + i}:v]overlay=0:0:enable='between(t,{t0:.2f},{t1:.2f})'[{nxt}]")
         cur = nxt
     if mark:
-        fc.append(f"[{cur}][{2 + len(caps)}:v]overlay=0:0,format=yuv420p[vout]")
+        fc.append(f"[{cur}][{2 + len(overlays)}:v]overlay=0:0,format=yuv420p[vout]")
     else:
         fc.append(f"[{cur}]format=yuv420p[vout]")
 
@@ -478,31 +824,32 @@ def pick_music():
 def build_video(script):
     shutil.rmtree(WORK, ignore_errors=True)
     WORK.mkdir()
+    USED.clear()
     if not features.check("raqm"):
         print("चेतावनी: raqm नहीं मिला, हिंदी मात्राएँ थोड़ी बिगड़ सकती हैं")
     mark = watermark_image()
-    clips = []
-    for i, sc in enumerate(script["scenes"]):
-        text = str(sc["text"]).strip()
-        query = sc.get("image_query", "")
+    hook = hook_image(script.get("hook", ""))
+    clips, credits, ok_count = [], [], 0
+    scenes = script["scenes"]
+    for i, sc in enumerate(scenes):
+        text = sc["text"]
         a = WORK / f"a{i}.mp3"
         boundaries = tts(text, a)
         d = duration(a)
         words = word_times(text, d, boundaries)
-        caps = caption_images(words, i)
+        overlays = list(caption_images(words, i))
+        if i == 0 and hook:
+            overlays.append((hook, 0.1, min(2.9, d + 0.2)))
 
-        clip = pixabay_video(query) or local_clip()
-        if clip:
-            kind, src = "video", clip
-            print(f"  वीडियो क्लिप मिली | {query}")
-        else:
-            kind, src = "image", WORK / f"bg{i}.jpg"
-            make_bg_image(query, src)
+        kind, src, ok, credit = get_visual(sc, i)
+        ok_count += 1 if ok else 0
+        if credit:
+            credits.append(credit)
 
         v = WORK / f"v{i}.mp4"
-        scene_video(kind, src, a, v, d, caps, mark)
+        scene_video(kind, src, a, v, d, overlays, mark)
         clips.append(v)
-        print(f"सीन {i + 1}/{len(script['scenes'])} तैयार ({d:.1f}s, {kind})")
+        print(f"सीन {i + 1}/{len(scenes)} तैयार ({d:.1f}s, {kind}, सही फ़ुटेज: {ok})")
 
     lst = WORK / "list.txt"
     lst.write_text("".join(f"file '{c.resolve()}'\n" for c in clips), encoding="utf-8")
@@ -527,11 +874,11 @@ def build_video(script):
             "-b:a", "128k", "-movflags", "+faststart", str(final),
         ])
     print(f"वीडियो तैयार: {duration(final):.1f} सेकंड")
-    return final
+    return final, {"total": len(scenes), "visual": ok_count, "credits": credits}
 
 
 # ---------------------------------------------------------------- upload
-def upload(video, title, description, tags):
+def upload(video, title, description, tags, privacy=None):
     from google.oauth2.credentials import Credentials
     from googleapiclient.discovery import build
     from googleapiclient.http import MediaFileUpload
@@ -545,7 +892,7 @@ def upload(video, title, description, tags):
         scopes=["https://www.googleapis.com/auth/youtube"],
     )
     yt = build("youtube", "v3", credentials=creds, cache_discovery=False)
-    privacy = os.environ.get("PRIVACY") or CFG.get("privacy", "public")
+    privacy = privacy or os.environ.get("PRIVACY") or CFG.get("privacy", "public")
     body = {
         "snippet": {
             "title": title,
@@ -582,30 +929,53 @@ def clean_tags(tags):
 def main():
     dry = os.environ.get("DRY_RUN") == "1"
     hist = load_hist()
-    script = make_script(hist)
+    try:
+        script = make_script(hist)
+    except GeminiDown as e:
+        summary("⚠️ आज वीडियो नहीं बना: Gemini अभी उपलब्ध नहीं (कोटा ख़त्म या सर्वर व्यस्त)। "
+                "कल अपने-आप दोबारा कोशिश होगी।\n\nकारण: " + str(e)[:300])
+        return
 
     title = str(script.get("title", "रोचक फ़ैक्ट")).strip()
     if len(title) > 85:
         title = title[:85].rstrip()
     if "#shorts" not in title.lower():
         title += " #Shorts"
-    hashtags = " ".join(CFG.get("hashtags", ["#Shorts"]))
-    description = (
-        str(script.get("description", "")).strip()
-        + "\n\n" + hashtags
-        + "\n\nयह वीडियो AI की मदद से बनाया गया है।"
-    )
-    tags = clean_tags(script.get("tags"))
     print("टाइटल:", title)
 
-    video = build_video(script)
+    video, stats = build_video(script)
+
+    hashtags = " ".join(CFG.get("hashtags", ["#Shorts"]))
+    description = str(script.get("description", "")).strip() + "\n\n" + hashtags
+    if stats["credits"]:
+        description += "\n\nफ़ोटो: " + " | ".join(stats["credits"][:6])
+    description += "\n\nयह वीडियो AI की मदद से बनाया गया है।"
+    tags = clean_tags(script.get("tags"))
+
+    ratio = stats["visual"] / max(1, stats["total"])
+    min_ratio = float(CFG.get("min_visual_ratio", 0.7))
+    print(f"सही फ़ुटेज वाले सीन: {stats['visual']}/{stats['total']} ({ratio:.0%})")
+    privacy = None
+    if ratio < min_ratio:
+        action = CFG.get("low_quality_action", "skip")
+        if action != "private":
+            summary(f"⏭️ वीडियो अपलोड नहीं किया: सिर्फ़ {stats['visual']}/{stats['total']} सीन में "
+                    f"सही फ़ुटेज मिली (कम से कम {min_ratio:.0%} चाहिए)। टाइटल: {title}\n\n"
+                    "बेकार वीडियो डालने से बेहतर है आज कुछ न डालना। work/final.mp4 देखने के लिए "
+                    "रन के Artifacts खोलें।")
+            hist.append({"date": datetime.date.today().isoformat(), "title": title,
+                         "id": "", "skipped": True})
+            save_hist(hist)
+            return
+        privacy = "private"
+        print("कम गुणवत्ता: वीडियो private अपलोड होगा, आप ख़ुद देखकर तय करें")
 
     if dry:
         print("DRY RUN: अपलोड नहीं किया। वीडियो:", video)
         return
 
-    vid = upload(video, title, description, tags)
-    print("अपलोड हो गया: https://youtube.com/shorts/" + vid)
+    vid = upload(video, title, description, tags, privacy)
+    summary(f"✅ अपलोड हो गया: https://youtube.com/shorts/{vid}  (सही फ़ुटेज {stats['visual']}/{stats['total']})")
     hist.append({"date": datetime.date.today().isoformat(), "title": title, "id": vid})
     save_hist(hist)
 
