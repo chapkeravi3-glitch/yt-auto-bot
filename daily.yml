@@ -2,7 +2,8 @@ name: Daily Video
 
 on:
   schedule:
-    - cron: "30 6,12 * * *"   # रोज़ 2 वीडियो: दोपहर 12:00 और शाम 6:00 (भारतीय समय)
+    - cron: "30 6,12 * * *" # रोज़ 12 PM और 6 PM भारतीय समय
+
   workflow_dispatch:
     inputs:
       dry_run:
@@ -17,17 +18,31 @@ jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 40
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      # 1. Checkout repository
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      # 2. Setup Python
+      - name: Setup Python
+        uses: actions/setup-python@v7
         with:
           python-version: "3.11"
+
+      # 3. Install system packages
       - name: System packages
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg fonts-noto-core libraqm0 libfribidi0
+
+      # 4. Install Python packages
       - name: Python packages
-        run: pip install -r requirements.txt
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # 5. Make video and upload
       - name: Make video and upload
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
@@ -38,18 +53,29 @@ jobs:
           PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
           DRY_RUN: ${{ inputs.dry_run && '1' || '0' }}
         run: python main.py
+
+      # 6. Save video artifact for 3 days
       - name: Keep video for 3 days
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: video
           path: work/final.mp4
           retention-days: 3
           if-no-files-found: ignore
+
+      # 7. Save history
       - name: Save history
         if: success()
         run: |
           git config user.name "yt-auto-bot"
           git config user.email "bot@users.noreply.github.com"
-          if [ -f state/history.json ]; then git add state/history.json; fi
-          git diff --cached --quiet || (git commit -m "update history" && git push)
+
+          if [ -f state/history.json ]; then
+            git add state/history.json
+          fi
+
+          git diff --cached --quiet || (
+            git commit -m "update history"
+            git push
+          )
