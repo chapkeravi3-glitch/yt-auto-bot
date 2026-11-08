@@ -1,81 +1,35 @@
-name: Daily Video
+name: Auto Shorts Maker
 
 on:
   schedule:
-    - cron: "30 6,12 * * *" # रोज़ 12 PM और 6 PM भारतीय समय
-
+    - cron: '0 2 * * *'
   workflow_dispatch:
-    inputs:
-      dry_run:
-        description: "सिर्फ़ टेस्ट (अपलोड न हो)"
-        type: boolean
-        default: false
-
-permissions:
-  contents: write
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 40
 
     steps:
-      # 1. Checkout repository
-      - name: Checkout
-        uses: actions/checkout@v7
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-      # 2. Setup Python
-      - name: Setup Python
-        uses: actions/setup-python@v7
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: '3.11'
 
-      # 3. Install system packages
-      - name: System packages
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg fonts-noto-core libraqm0 libfribidi0
-
-      # 4. Install Python packages
-      - name: Python packages
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install requests Pillow google-api-python-client google-auth-oauthlib edge-tts gtts
 
-      # 5. Make video and upload
-      - name: Make video and upload
+      - name: Run Auto Bot Script
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
+          PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
           YT_CLIENT_ID: ${{ secrets.YT_CLIENT_ID }}
           YT_CLIENT_SECRET: ${{ secrets.YT_CLIENT_SECRET }}
           YT_REFRESH_TOKEN: ${{ secrets.YT_REFRESH_TOKEN }}
-          PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
-          PIXABAY_API_KEY: `${{ secrets.PEXELS_API_KEY }}`
-          DRY_RUN: ${{ inputs.dry_run && '1' || '0' }}
-        run: python main.py
-
-      # 6. Save video artifact for 3 days
-      - name: Keep video for 3 days
-        if: always()
-        uses: actions/upload-artifact@v6
-        with:
-          name: video
-          path: work/final.mp4
-          retention-days: 3
-          if-no-files-found: ignore
-
-      # 7. Save history
-      - name: Save history
-        if: success()
         run: |
-          git config user.name "yt-auto-bot"
-          git config user.email "bot@users.noreply.github.com"
-
-          if [ -f state/history.json ]; then
-            git add state/history.json
-          fi
-
-          git diff --cached --quiet || (
-            git commit -m "update history"
-            git push
-          )
+          python main.py
