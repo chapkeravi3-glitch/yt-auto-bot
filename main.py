@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-Auto Shorts maker v3 (Ultimate Stable Version)
-==============================================
+Auto Shorts maker v3 (Ultimate Clean Version)
+=============================================
   -> Gemini API (Direct & Correct Endpoint)
   -> edge-tts (हिंदी आवाज़) + शब्द-दर-शब्द चमकते कैप्शन + हुक-टेक्स्ट
   -> Wikimedia Commons फ़ोटो और Local Clips
@@ -115,7 +115,7 @@ def _parse_json(txt):
     try:
         return json.loads(txt)
     except Exception:
-        m = re.search(r"\{.*\}", txt, (re.S))
+        m = re.search(r"\{.*\}", txt, re.S)
         if m:
             return json.loads(m.group(0))
         raise
@@ -126,7 +126,6 @@ def gemini_json(prompt):
     if not key:
         raise GeminiDown("GEMINI_API_KEY नहीं मिली")
     
-    # सही और काम करने वाले जेमिनी एंडपॉइंट्स की सूची
     models = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
     last_err = ""
     
@@ -143,10 +142,8 @@ def gemini_json(prompt):
                 return _parse_json(txt)
             else:
                 last_err = f"{model} HTTP {r.status_code}: {r.text[:120]}"
-                print("Gemini warning:", last_err)
         except Exception as e:
             last_err = f"{model} error: {str(e)}"
-            print("Gemini warning:", last_err)
             continue
             
     raise GeminiDown("Gemini सभी मॉडल फेल हो गए: " + last_err)
@@ -269,32 +266,4 @@ def caption_images(words, idx):
             font = load_font(size)
             probe = ImageDraw.Draw(Image.new("RGBA", (10, 10)))
             gap = max(int(size * 0.28), 10)
-            widths = [probe.textlength(words[k][2], font=font) for k in chunk]
-            total = sum(widths) + gap * (len(chunk) - 1)
-            if total <= W - 110 or size <= 50:
-                break
-            size -= 6
-        for active in chunk:
-            img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-            d = ImageDraw.Draw(img)
-            x = (W - total) / 2
-            y = int(H * 0.62)
-            for k, wd in zip(chunk, widths):
-                color = (255, 221, 0, 255) if k == active else (255, 255, 255, 255)
-                d.text((x, y), words[k][2], font=font, fill=color, stroke_width=8, stroke_fill=(0, 0, 0, 255))
-                x += wd + gap
-            path = WORK / f"cap{idx}_{active}.png"
-            img.save(path)
-            result.append((path, words[active][0], words[active][1]))
-    return result
-
-
-def hook_image(text):
-    text = (text or "").strip()
-    if not text:
-        return None
-    font = load_font(100)
-    img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    d = ImageDraw.Draw(img)
-    tw = d.textlength(text, font=font)
-    d.rounded_rectangle([50, 350, W - 50, 550], radius=30, fill=(0, 0, 0, 1
+            widths =
