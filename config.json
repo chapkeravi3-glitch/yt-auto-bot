@@ -8,7 +8,7 @@
   "category_id": "24",
   "privacy": "private","pixabay_api_key": "..."
 
-  "watermark": "फ़िल्मी फ़ैक्ट्स",'
+  "watermark": "फ़िल्मी फ़ैक्ट्स"',
   "hashtags": ["#Shorts", "#MovieFacts", "#Bollywood", "#हिंदी"],
   "gemini_models": ["gemini-3.8-flash", "gemini-flash-latest", "gemini-flash-lite-latest"],
   "pixabay_api_key": "यहाँ-अपनी-नई-KEY-चिपकाएँ"
