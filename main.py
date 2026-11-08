@@ -24,6 +24,7 @@ config.json की नई वैकल्पिक चाबियाँ (न �
   "use_local_clips":   false  (true करने पर clips/ फ़ोल्डर की क्लिप आख़िरी विकल्प में आएँगी)
 """
 import asyncio
+import base64
 import datetime
 import glob
 import html
@@ -119,10 +120,10 @@ COMMON_RULES = """
 - बीच में एक सस्पेंस/सवाल रखो ताकि दर्शक रुका रहे। आख़िर में चौंकाने वाला मोड़ और छोटी अपील (सब्सक्राइब)। आख़िरी लाइन ऐसी हो कि वीडियो दोबारा शुरू से देखने का मन करे।
 - हर सीन के लिए "kind" चुनो:
   * "photo": जब बात किसी ख़ास व्यक्ति, जगह, फ़िल्म, घटना या चीज़ की हो। queries में उसका सही अंग्रेज़ी नाम लिखो (जैसे "Shah Rukh Khan", "Taj Mahal").
-  * "stock": जब आम माहौल दिखाना हो। queries में चलती फ़ुटेज के 2-3 अंग्रेज़ी शब्द (जैसे "crowd applause", "city night", "film camera").
+  * "stock": जब आम माहौल दिखाना हो। queries में सिर्फ़ चीज़ों, जगहों या माहौल के 2-3 अंग्रेज़ी शब्द, कभी किसी इंसान या चेहरे के नहीं (जैसे "film reel", "cinema hall interior", "clapperboard", "golden trophy", "city night").
 - हर सीन के "queries" में 2-3 अंग्रेज़ी विकल्प हों: पहला सबसे सटीक, बाद वाले ज़्यादा आम। जहाँ भी हो सके "photo" चुनो और असली नाम (व्यक्ति, फ़िल्म, जगह) लिखो।
 - हर सीन का "punch": उस सीन का सबसे ज़रूरी 2-4 शब्द का वाक्यांश या आँकड़ा देवनागरी में (जैसे "₹500 करोड़", "सिर्फ़ 3 दिन में"), जो स्क्रीन पर बड़ा लिखा जाएगा।
-- "fallback_queries": 4-5 आम पर विषय से जुड़ी अंग्रेज़ी फ़ुटेज-खोजें (जैसे "cinema theatre", "film reel", "red carpet", "audience clapping"), जो किसी भी सीन के पीछे ठीक लगें।
+- "fallback_queries": 4-5 आम पर विषय से जुड़ी अंग्रेज़ी खोजें (जैसे "cinema hall interior", "film reel", "clapperboard", "golden trophy"), जिनमें कोई इंसान या चेहरा न हो और जो किसी भी सीन के पीछे ठीक लगें।
 - title हिंदी में, 70 अक्षरों तक, जिज्ञासा जगाने वाला। description 2-3 लाइन। tags 8-12 (हिंदी और अंग्रेज़ी मिलाकर)।
 - ये टाइटल पहले बन चुके हैं, इनसे अलग नई कहानी चुनो:
 {recent}
@@ -652,14 +653,14 @@ def _license_ok(lic):
     return bool(re.search(r"cc by|cc0|public domain|^pd\b", low))
 
 
-def commons_photo(query):
+def commons_photo(query, ratio=0.6):
     """Wikimedia Commons की मुफ़्त-लाइसेंस वाली असली फ़ोटो। लौटाता है (img, credit) या None।"""
     if "commons" in DISABLED:
         return None
     words = qwords(query)
     if not words:
         return None
-    need = max(1, math.ceil(len(words) * 0.6))
+    need = max(1, math.ceil(len(words) * ratio))
     params = {
         "action": "query", "format": "json", "generator": "search",
         "gsrsearch": f"{query} filetype:bitmap", "gsrnamespace": 6, "gsrlimit": 20,
@@ -742,17 +743,17 @@ def pexels_photo(query):
     return None
 
 
-def openverse_photo(query):
+def openverse_photo(query, ratio=0.5):
     """Openverse (बिना key): CC लाइसेंस वाली असली फ़ोटो। लौटाता है (img, credit) या None।"""
     if "openverse" in DISABLED:
         return None
     words = qwords(query)
     if not words:
         return None
-    need = max(1, math.ceil(len(words) * 0.5))
+    need = max(1, math.ceil(len(words) * ratio))
     results = []
     for extra in ({"extension": "jpg,png"}, {}):
-        params = {"q": query, "page_size": 20, "mature": "false",
+        params = {"q": query, "page_size": 20, "mature": "false", "category": "photograph",
                   "license_type": "commercial,modification", **extra}
         try:
             r = requests.get("https://api.openverse.org/v1/images/", params=params,
@@ -878,9 +879,27 @@ def local_clip():
     return pathlib.Path(random.choice(files)) if files else None
 
 
+PERSON_WORDS = set("""man men woman women actor actress celebrity celebrities star stars person people
+girl boy portrait face faces couple family model bride groom singer dancer director""".split())
+
+
+def person_free(q):
+    """आम खोज में इंसान/चेहरे वाले शब्द न हों (अनजान लोगों की फ़ोटो भ्रम पैदा करती है)।"""
+    low = (q or "").lower()
+    if "red carpet" in low or "award show" in low:
+        return False
+    return not (set(qwords(q)) & PERSON_WORDS)
+
+
+def _named_ratio(q):
+    n = len(qwords(q))
+    return 1.0 if n <= 3 else 0.75  # ख़ास नाम के सारे शब्द शीर्षक में मिलने चाहिए
+
+
 def get_visual(scene, idx, fallbacks=()):
-    """सीन के लिए सबसे सही फ़ोटो/फ़ुटेज। लौटाता है (kind, src, ok, credit)।
-    ok: 1 = असली फ़ोटो/क्लिप, 0.6 = डिज़ाइन किया टेक्स्ट-कार्ड।"""
+    """सीन के लिए सबसे सही फ़ोटो/फ़ुटेज। लौटाता है (kind, src, ok, credit, meta)।
+    ok: 1 = असली फ़ोटो/क्लिप, 0.6 = डिज़ाइन किया टेक्स्ट-कार्ड।
+    meta["generic"]=True मतलब ख़ास नाम की नहीं, आम फ़ोटो है (इसकी समीक्षा ज़्यादा सख़्त)।"""
     queries = (scene.get("queries") or [])[:3]
     kind = scene.get("kind", "stock")
     has_video = bool(get_key("PEXELS_API_KEY") or get_key("PIXABAY_API_KEY"))
@@ -894,13 +913,20 @@ def get_visual(scene, idx, fallbacks=()):
         img = pexels_photo(q)
         return (img, None) if img is not None else None
 
-    def try_photos(qs, order):
+    named = [("commons", lambda q: commons_photo(q, _named_ratio(q))),
+             ("openverse", lambda q: openverse_photo(q, _named_ratio(q)))]
+    generic = [("openverse", lambda q: openverse_photo(q, 0.5)),
+               ("commons", lambda q: commons_photo(q, 0.6))]
+    extra = [("pexels", pexels_src)] if get_key("PEXELS_API_KEY") else []
+
+    def try_photos(qs, order, is_generic):
         for q in qs[:2]:
-            for fn in order:
+            for label, fn in order:
                 got = fn(q)
                 if got:
-                    print(f"  असली फ़ोटो ({fn.__name__}) | {q}")
-                    return "image", photo_path(got[0]), 1, got[1]
+                    print(f"  असली फ़ोटो ({label}) | {q}")
+                    return ("image", photo_path(got[0]), 1, got[1],
+                            {"title": got[1] or "", "query": q, "generic": is_generic})
         return None
 
     def try_video(qs):
@@ -909,25 +935,23 @@ def get_visual(scene, idx, fallbacks=()):
         got = pick_video(qs)
         if got:
             print(f"  वीडियो क्लिप | {got[1]}")
-            return "video", got[0], 1, None
+            return "video", got[0], 1, None, {"query": got[1]}
         return None
 
-    named = [commons_photo, openverse_photo]      # ख़ास नाम: Commons पहले
-    generic = [openverse_photo, commons_photo]    # आम चीज़: Openverse पहले
-    extra = [pexels_src] if get_key("PEXELS_API_KEY") else []
-
+    safe = [q for q in queries if person_free(q)]
     if kind == "photo":
-        r = try_photos(queries, named) or try_video(queries) or try_photos(queries, extra)
+        r = (try_photos(queries, named, False) or try_video(queries)
+             or try_photos(safe, extra, True))
     else:
-        r = try_video(queries) or try_photos(queries, generic) or try_photos(queries, extra)
+        r = try_video(queries) or try_photos(safe, generic, True) or try_photos(safe, extra, True)
     if r:
         return r
 
-    # विषय से जुड़ी आम फ़ोटो/क्लिप (जैसे फ़िल्म चैनल के लिए "film reel", "cinema hall")
-    fb = [q for q in fallbacks if q]
+    # विषय से जुड़ी आम चीज़/जगह की फ़ोटो या क्लिप
+    fb = [q for q in fallbacks if q and person_free(q)]
     random.shuffle(fb)
     for q in fb[:2]:
-        r = try_video([q]) or try_photos([q], generic)
+        r = try_video([q]) or try_photos([q], generic, True)
         if r:
             print("  (विषय से जुड़ी आम फ़ोटो/क्लिप)")
             return r
@@ -935,13 +959,90 @@ def get_visual(scene, idx, fallbacks=()):
     clip = local_clip()
     if clip:
         print("  अपनी क्लिप (clips/ फ़ोल्डर)")
-        return "video", clip, 0.6, None
+        return "video", clip, 0.6, None, {}
+    return make_card(scene, idx)
 
+
+def make_card(scene, idx):
     punch = scene.get("punch") or " ".join(scene.get("text", "").split()[:3])
     print(f"  टेक्स्ट-कार्ड | {punch}")
     p = WORK / f"bg{idx}.jpg"
     card_image(punch, idx).save(p, quality=92)
-    return "image", p, 0.6, None
+    return "image", p, 0.6, None, {"card": True}
+
+
+def _model_list():
+    models = list(CFG.get("gemini_models") or [])
+    for m in DEFAULT_MODELS:
+        if m not in models:
+            models.append(m)
+    return models
+
+
+def review_visuals(script, items):
+    """एक ही Gemini कॉल में सारी फ़ोटो की समीक्षा: कौन-सी सीन से सचमुच मेल खाती है।
+    items = [{"n", "path", "text", "query", "title"}]. लौटाता है {n: (ok, कारण)} या None।"""
+    key = get_key("GEMINI_API_KEY")
+    if not key or not items:
+        return None
+    prompt = (
+        "You are a strict photo editor for a Hindi YouTube Short.\n"
+        f"Video title: {script.get('title', '')}\n"
+        "Each numbered image below is the background of one scene. For every image decide "
+        "ok=true ONLY if it clearly fits what that scene says. Use the image's source title "
+        "(given with it) to know who or what is shown; never try to identify anyone from their face.\n"
+        "Set ok=false when: it shows a person whose source title names someone other than the "
+        "person the scene is about, or the person is unnamed; it is a random event, red-carpet "
+        "or crowd photo of unnamed people; it is a drawing, painting, caricature or old print; "
+        "it is a screenshot, collage, poster with lots of text, logo or watermarked; it is low "
+        "quality; or it is unrelated to the scene. Photos of objects or places (film reel, cinema "
+        "hall, trophy) are ok if they fit the scene's mood. When unsure, set ok=false.\n"
+        'Reply ONLY JSON: {"results":[{"n":1,"ok":true,"reason":"max 8 words"}]}'
+    )
+    parts = [{"text": prompt}]
+    for it in items:
+        try:
+            with Image.open(it["path"]) as im:
+                im = im.convert("RGB")
+                im.thumbnail((360, 640))
+                buf = io.BytesIO()
+                im.save(buf, "JPEG", quality=70)
+        except Exception:
+            return None
+        parts.append({"text": f"Image {it['n']}. Scene says: {it['text'][:140]} | "
+                              f"search: {it['query']} | source title: {it['title'][:140] or '(unknown)'}"})
+        parts.append({"inline_data": {"mime_type": "image/jpeg",
+                                      "data": base64.b64encode(buf.getvalue()).decode()}})
+    body = {"contents": [{"parts": parts}],
+            "generationConfig": {"temperature": 0.1, "responseMimeType": "application/json"}}
+    for model in _model_list()[:4]:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+        for attempt in range(2):
+            try:
+                r = requests.post(url, headers={"x-goog-api-key": key,
+                                                "Content-Type": "application/json"},
+                                  json=body, timeout=120)
+            except Exception as e:
+                print("review issue:", str(e)[:80])
+                time.sleep(3)
+                continue
+            if r.status_code == 200:
+                try:
+                    txt = r.json()["candidates"][0]["content"]["parts"][0]["text"]
+                    data = _parse_json(txt)
+                    out = {}
+                    for x in data.get("results", []):
+                        out[int(x.get("n"))] = (x.get("ok") is True, str(x.get("reason", ""))[:60])
+                    if out:
+                        return out
+                except Exception as e:
+                    print("review parse issue:", str(e)[:80])
+                break
+            print(f"review issue: {model} HTTP {r.status_code}")
+            if r.status_code in (400, 404, 429):
+                break
+            time.sleep(5)
+    return None
 
 
 # ---------------------------------------------------------------- video
@@ -1012,12 +1113,15 @@ def build_video(script):
     WORK.mkdir()
     USED.clear()
     CLIP_POOL.clear()
+    DISABLED.clear()
     if not features.check("raqm"):
         print("चेतावनी: raqm नहीं मिला, हिंदी मात्राएँ थोड़ी बिगड़ सकती हैं")
     mark = watermark_image()
     hook = hook_image(script.get("hook", ""))
-    clips, credits, ok_count = [], [], 0
     scenes = script["scenes"]
+
+    # चरण 1: हर सीन की आवाज़, कैप्शन और फ़ोटो/फ़ुटेज चुनना
+    prep = []
     for i, sc in enumerate(scenes):
         text = sc["text"]
         a = WORK / f"a{i}.mp3"
@@ -1027,16 +1131,43 @@ def build_video(script):
         overlays = list(caption_images(words, i))
         if i == 0 and hook:
             overlays.append((hook, 0.1, min(2.9, d + 0.2)))
+        kind, src, ok, credit, meta = get_visual(sc, i, script.get("fallback_queries", []))
+        prep.append({"i": i, "sc": sc, "audio": a, "d": d, "overlays": overlays,
+                     "kind": kind, "src": src, "ok": ok, "credit": credit, "meta": meta})
+        print(f"सीन {i + 1}/{len(scenes)} चुना ({d:.1f}s, {kind}, अंक {ok:g})")
 
-        kind, src, ok, credit = get_visual(sc, i, script.get("fallback_queries", []))
-        ok_count += ok
-        if credit:
-            credits.append(credit)
+    # चरण 2: सारी फ़ोटो की एक साथ समीक्षा; बेमेल फ़ोटो की जगह टेक्स्ट-कार्ड
+    check = [p for p in prep if p["kind"] == "image" and not p["meta"].get("card")]
+    if check:
+        items = [{"n": p["i"] + 1, "path": p["src"], "text": p["sc"]["text"],
+                  "query": p["meta"].get("query", ""), "title": p["meta"].get("title", "")}
+                 for p in check]
+        verdict = review_visuals(script, items)
+        if verdict is None:
+            print("⚠️ फ़ोटो की समीक्षा नहीं हो सकी: आम (बिना नाम की) फ़ोटो हटाकर कार्ड लगा रहे हैं")
+        for p in check:
+            if verdict is None:
+                bad, why = bool(p["meta"].get("generic")), "समीक्षा नहीं हुई"
+            else:
+                okv, why = verdict.get(p["i"] + 1, (False, "जवाब में नहीं"))
+                bad = not okv
+            if bad:
+                print(f"  ✂️ सीन {p['i'] + 1} की फ़ोटो हटाई ({why}) -> टेक्स्ट-कार्ड")
+                kind, src, ok, credit, meta = make_card(p["sc"], p["i"])
+                p.update(kind=kind, src=src, ok=ok, credit=credit, meta=meta)
+            else:
+                print(f"  ✅ सीन {p['i'] + 1} की फ़ोटो ठीक ({why})")
 
-        v = WORK / f"v{i}.mp4"
-        scene_video(kind, src, a, v, d, overlays, mark)
+    # चरण 3: हर सीन का वीडियो बनाना और जोड़ना
+    clips, credits, ok_count = [], [], 0
+    for p in prep:
+        ok_count += p["ok"]
+        if p["credit"]:
+            credits.append(p["credit"])
+        v = WORK / f"v{p['i']}.mp4"
+        scene_video(p["kind"], p["src"], p["audio"], v, p["d"], p["overlays"], mark)
         clips.append(v)
-        print(f"सीन {i + 1}/{len(scenes)} तैयार ({d:.1f}s, {kind}, सही फ़ुटेज: {ok:g})")
+        print(f"सीन {p['i'] + 1}/{len(scenes)} तैयार")
 
     lst = WORK / "list.txt"
     lst.write_text("".join(f"file '{c.resolve()}'\n" for c in clips), encoding="utf-8")
