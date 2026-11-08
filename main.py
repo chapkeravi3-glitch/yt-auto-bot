@@ -64,11 +64,12 @@ FPS = 25
 UA = {"User-Agent": "yt-auto-bot/3.0 (https://github.com/chapkeravi3-glitch/yt-auto-bot; hobby project) python-requests"}
 
 DEFAULT_MODELS = [
+    "gemini-1.5-flash",
     "gemini-2.5-flash",
-    "gemini-2.5-flash-lite",
     "gemini-2.0-flash",
     "gemini-flash-latest",
 ]
+
 
 PALETTES = [
     ((30, 60, 140), (160, 50, 120)),
