@@ -1,1 +1,77 @@
+# -*- coding: utf-8 -*-
+"""
+नए YouTube चैनल को जोड़ने के लिए एक बार चलाने वाली स्क्रिप्ट (Google Device Login)।
+1) लॉग में दिखे पते पर जाएँ, कोड डालें, और **उसी ईमेल से लॉगिन करें जिस पर वह चैनल है**।
+2) चैनल (या ब्रांड खाता) चुनें और Allow दबाएँ।
+3) लॉग में चैनल का नाम और REFRESH TOKEN छपेगा। टोकन को GitHub Secret में रखें।
+"""
+import os
+import sys
+import time
+
+import requests
+
+SCOPE = "https://www.googleapis.com/auth/youtube"
+
+
+def main():
+    cid = os.environ.get("YT_CLIENT_ID", "").strip()
+    secret = os.environ.get("YT_CLIENT_SECRET", "").strip()
+    if not cid or not secret:
+        sys.exit("YT_CLIENT_ID / YT_CLIENT_SECRET Secret नहीं मिले")
+
+    r = requests.post("https://oauth2.googleapis.com/device/code",
+                      data={"client_id": cid, "scope": SCOPE}, timeout=30)
+    d = r.json()
+    if "device_code" not in d:
+        sys.exit(f"कोड नहीं मिला: {d}")
+
+    print("=" * 40, flush=True)
+    print(f"1) खोलें: {d.get('verification_url', 'https://www.google.com/device')}", flush=True)
+    print(f"2) कोड डालें: {d['user_code']}", flush=True)
+    print("3) उसी ईमेल से लॉगिन करें जिस पर नया चैनल है, चैनल चुनें, Allow दबाएँ", flush=True)
+    print("=" * 40, flush=True)
+
+    interval = int(d.get("interval", 5))
+    deadline = time.time() + int(d.get("expires_in", 900))
+    while time.time() < deadline:
+        time.sleep(interval)
+        t = requests.post("https://oauth2.googleapis.com/token", data={
+            "client_id": cid, "client_secret": secret,
+            "device_code": d["device_code"],
+            "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+        }, timeout=30).json()
+        err = t.get("error")
+        if err == "authorization_pending":
+            continue
+        if err == "slow_down":
+            interval += 5
+            continue
+        if err:
+            sys.exit(f"लॉगिन नहीं हुआ: {t}")
+        refresh = t.get("refresh_token")
+        if not refresh:
+            sys.exit("refresh_token नहीं मिला। myaccount.google.com/permissions में इस ऐप की "
+                     "अनुमति हटाकर दोबारा कोशिश करें।")
+        # कौन-सा चैनल जुड़ा, यह दिखाकर पुष्टि
+        try:
+            ch = requests.get("https://www.googleapis.com/youtube/v3/channels",
+                              params={"part": "snippet", "mine": "true"},
+                              headers={"Authorization": "Bearer " + t["access_token"]},
+                              timeout=30).json()
+            names = [i["snippet"]["title"] for i in ch.get("items", [])]
+        except Exception:
+            names = []
+        print("\n" + "=" * 40, flush=True)
+        print("✅ लॉगिन हो गया। जुड़ा चैनल:", ", ".join(names) if names else "(नाम नहीं मिला)", flush=True)
+        print("\nREFRESH TOKEN (इसे GitHub Secret YT_REFRESH_TOKEN_FACT में रखें):", flush=True)
+        print(refresh, flush=True)
+        print("=" * 40, flush=True)
+        print("ज़रूरी: टोकन कॉपी करके इस रन को हटा दें (Actions -> रन -> ⋯ -> Delete workflow run)।", flush=True)
+        return
+    sys.exit("समय ख़त्म हो गया, कोड अब काम नहीं करेगा। नया रन चलाएँ।")
+
+
+if __name__ == "__main__":
+    main()
 
