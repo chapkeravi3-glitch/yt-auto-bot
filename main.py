@@ -74,7 +74,8 @@ WORK = ROOT / "work"
 HIST = ROOT / "state" / "history.json"
 W, H = 1080, 1920
 FPS = 25
-UA = {"User-Agent": "Mozilla/5.0 (compatible; AutoShortsBot/3.0)"}
+# Wikimedia की नीति: पहचान और संपर्क वाला User-Agent चाहिए, वरना रोक देते हैं
+UA = {"User-Agent": "yt-auto-bot/3.0 (https://github.com/chapkeravi3-glitch/yt-auto-bot; hobby project) python-requests"}
 
 DEFAULT_MODELS = [
     "gemini-2.5-flash",
@@ -94,6 +95,7 @@ PALETTES = [
 
 JSON_SHAPE = (
     '{"title": "...", "hook": "...", "description": "...", "tags": ["..."], '
+    '"fallback_queries": ["...", "..."], '
     '"scenes": [{"text": "...", "kind": "photo", "queries": ["...", "..."]}]}'
 )
 
@@ -109,6 +111,7 @@ COMMON_RULES = """
   * "photo": जब बात किसी ख़ास व्यक्ति, जगह, फ़िल्म, घटना या चीज़ की हो। queries में उसका सही अंग्रेज़ी नाम लिखो (जैसे "Shah Rukh Khan", "Taj Mahal").
   * "stock": जब आम माहौल दिखाना हो। queries में चलती फ़ुटेज के 2-3 अंग्रेज़ी शब्द (जैसे "crowd applause", "city night", "film camera").
 - हर सीन के "queries" में 2-3 अंग्रेज़ी विकल्प हों: पहला सबसे सटीक, बाद वाले ज़्यादा आम।
+- "fallback_queries": 4-5 आम पर विषय से जुड़ी अंग्रेज़ी फ़ुटेज-खोजें (जैसे "cinema theatre", "film reel", "red carpet", "audience clapping"), जो किसी भी सीन के पीछे ठीक लगें।
 - title हिंदी में, 70 अक्षरों तक, जिज्ञासा जगाने वाला। description 2-3 लाइन। tags 8-12 (हिंदी और अंग्रेज़ी मिलाकर)।
 - ये टाइटल पहले बन चुके हैं, इनसे अलग नई कहानी चुनो:
 {recent}
@@ -315,6 +318,11 @@ def make_script(hist):
     if len(scenes) < 5:
         raise RuntimeError("स्क्रिप्ट में सीन बहुत कम हैं")
     data["scenes"] = scenes[:16]
+    fb = [str(q).strip() for q in (data.get("fallback_queries") or []) if str(q).strip()]
+    for q in CFG.get("fallback_queries", []):
+        if q not in fb:
+            fb.append(q)
+    data["fallback_queries"] = fb[:8]
     return data
 
 
@@ -505,6 +513,7 @@ def watermark_image():
 # ---------------------------------------------------------------- फ़ुटेज/फ़ोटो खोज
 STOP = set("a an the of in on at to for and with from by video footage shot view".split())
 USED = set()
+CLIP_POOL = []  # इस वीडियो में अब तक मिली क्लिप (फिर से इस्तेमाल के लिए)
 
 
 def qwords(q):
@@ -601,11 +610,12 @@ def pick_video(queries):
         words = qwords(q)
         if not words:
             continue
-        cands = [c for c in pexels_videos(q) + pixabay_videos(q)
-                 if c["dur"] >= 4 and c["id"] not in USED]
+        px, pb = pexels_videos(q), pixabay_videos(q)
+        cands = [c for c in px + pb if c["dur"] >= 4 and c["id"] not in USED]
         for c in cands:
             c["score"] = match_score(words, c["text"])
         good = [c for c in cands if c["score"] >= 1]
+        print(f"    खोज '{q}': Pexels {len(px)}, Pixabay {len(pb)}, मेल खाईं {len(good)}")
         if not good:
             continue
         top = max(c["score"] for c in good)
@@ -617,6 +627,7 @@ def pick_video(queries):
                 p = WORK / f"clip_{random.randint(1, 10**9)}.mp4"
                 p.write_bytes(data)
                 USED.add(c["id"])
+                CLIP_POOL.append(p)
                 return p, q
     return None
 
@@ -640,8 +651,16 @@ def commons_photo(query):
         "prop": "imageinfo", "iiprop": "url|mime|size|extmetadata", "iiurlwidth": 1600,
     }
     try:
-        r = requests.get("https://commons.wikimedia.org/w/api.php", params=params,
-                         headers=UA, timeout=30)
+        r = None
+        for attempt in range(2):
+            r = requests.get("https://commons.wikimedia.org/w/api.php", params=params,
+                             headers=UA, timeout=30)
+            if r.status_code == 200:
+                break
+            print(f"commons issue: HTTP {r.status_code} {r.text[:80]!r}")
+            time.sleep(3)
+        if r is None or r.status_code != 200:
+            return None
         pages = r.json().get("query", {}).get("pages", {})
     except Exception as e:
         print("commons issue:", e)
@@ -737,9 +756,9 @@ def local_clip():
     return pathlib.Path(random.choice(files)) if files else None
 
 
-def get_visual(scene, idx):
+def get_visual(scene, idx, fallbacks=()):
     """सीन के लिए सबसे सही फ़ुटेज/फ़ोटो। लौटाता है (kind, src, ok, credit)।
-    ok=False मतलब सही फ़ुटेज नहीं मिली और सादा रंगीन बैकग्राउंड लगा।"""
+    ok: 1 = सटीक/विषय से जुड़ी फ़ुटेज, 0.5 = पहले मिली क्लिप दोबारा, 0 = सादा रंगीन बैकग्राउंड।"""
     queries = scene.get("queries") or []
     kind = scene.get("kind", "stock")
 
@@ -753,35 +772,46 @@ def get_visual(scene, idx):
             got = commons_photo(q)
             if got:
                 print(f"  असली फ़ोटो (Commons) | {q}")
-                return "image", photo_path(got[0]), True, got[1]
+                return "image", photo_path(got[0]), 1, got[1]
         got = pick_video(queries)
         if got:
             print(f"  वीडियो क्लिप | {got[1]}")
-            return "video", got[0], True, None
+            return "video", got[0], 1, None
         for q in queries:
             img = pexels_photo(q)
             if img is not None:
                 print(f"  फ़ोटो (Pexels) | {q}")
-                return "image", photo_path(img), True, None
+                return "image", photo_path(img), 1, None
     else:
         got = pick_video(queries)
         if got:
             print(f"  वीडियो क्लिप | {got[1]}")
-            return "video", got[0], True, None
+            return "video", got[0], 1, None
         for q in queries:
             img = pexels_photo(q)
             if img is not None:
                 print(f"  फ़ोटो (Pexels) | {q}")
-                return "image", photo_path(img), True, None
+                return "image", photo_path(img), 1, None
 
+    # विषय से जुड़ी आम फ़ुटेज (जैसे फ़िल्म वाले चैनल के लिए "film reel", "red carpet")
+    fb = [q for q in fallbacks if q]
+    random.shuffle(fb)
+    for q in fb[:4]:
+        got = pick_video([q])
+        if got:
+            print(f"  विषय से जुड़ी आम क्लिप | {got[1]}")
+            return "video", got[0], 1, None
+    if CLIP_POOL:
+        print("  पहले मिली क्लिप दोबारा (नए हिस्से से)")
+        return "video", random.choice(CLIP_POOL), 0.5, None
     clip = local_clip()
     if clip:
         print("  अपनी क्लिप (clips/ फ़ोल्डर)")
-        return "video", clip, False, None
+        return "video", clip, 0.5, None
     print(f"  सही फ़ुटेज नहीं मिली, रंगीन बैकग्राउंड | {queries[:1]}")
     p = WORK / f"bg{idx}.jpg"
     gradient_bg().save(p, quality=92)
-    return "image", p, False, None
+    return "image", p, 0, None
 
 
 # ---------------------------------------------------------------- video
@@ -851,6 +881,7 @@ def build_video(script):
     shutil.rmtree(WORK, ignore_errors=True)
     WORK.mkdir()
     USED.clear()
+    CLIP_POOL.clear()
     if not features.check("raqm"):
         print("चेतावनी: raqm नहीं मिला, हिंदी मात्राएँ थोड़ी बिगड़ सकती हैं")
     mark = watermark_image()
@@ -867,15 +898,15 @@ def build_video(script):
         if i == 0 and hook:
             overlays.append((hook, 0.1, min(2.9, d + 0.2)))
 
-        kind, src, ok, credit = get_visual(sc, i)
-        ok_count += 1 if ok else 0
+        kind, src, ok, credit = get_visual(sc, i, script.get("fallback_queries", []))
+        ok_count += ok
         if credit:
             credits.append(credit)
 
         v = WORK / f"v{i}.mp4"
         scene_video(kind, src, a, v, d, overlays, mark)
         clips.append(v)
-        print(f"सीन {i + 1}/{len(scenes)} तैयार ({d:.1f}s, {kind}, सही फ़ुटेज: {ok})")
+        print(f"सीन {i + 1}/{len(scenes)} तैयार ({d:.1f}s, {kind}, सही फ़ुटेज: {ok:g})")
 
     lst = WORK / "list.txt"
     lst.write_text("".join(f"file '{c.resolve()}'\n" for c in clips), encoding="utf-8")
@@ -952,8 +983,26 @@ def clean_tags(tags):
     return out
 
 
+def key_status():
+    """कौन-सी चाबियाँ (Secrets) मिलीं: सिर्फ़ हाँ/नहीं छापता, कीमत कभी नहीं।"""
+    names = ["GEMINI_API_KEY", "PEXELS_API_KEY", "PIXABAY_API_KEY",
+             "YT_REFRESH_TOKEN", "YT_CLIENT_ID", "YT_CLIENT_SECRET"]
+    st = {n: bool(os.environ.get(n)) for n in names}
+    print("चाबियों की स्थिति:")
+    for n, v in st.items():
+        print(f"  {n}: {'✅ मिली' if v else '❌ नहीं मिली'}")
+    return st
+
+
 def main():
     dry = os.environ.get("DRY_RUN") == "1"
+    keys = key_status()
+    if not keys["PEXELS_API_KEY"] and not keys["PIXABAY_API_KEY"]:
+        summary("❌ रुक गया: असली वीडियो-फ़ुटेज के लिए PEXELS_API_KEY या PIXABAY_API_KEY "
+                "(दोनों मुफ़्त) चाहिए, पर दोनों नहीं मिलीं। इनके बिना सिर्फ़ फ़ोटो मिलती है और वीडियो बेकार बनता है।\n\n"
+                "GitHub रेपो -> Settings -> Secrets and variables -> Actions -> New repository secret में "
+                "जोड़ें, और workflow की env सूची में भी इन्हें `${{ secrets.PEXELS_API_KEY }}` की तरह लिखें।")
+        sys.exit(1)
     hist = load_hist()
     try:
         script = make_script(hist)
@@ -980,12 +1029,12 @@ def main():
 
     ratio = stats["visual"] / max(1, stats["total"])
     min_ratio = float(CFG.get("min_visual_ratio", 0.7))
-    print(f"सही फ़ुटेज वाले सीन: {stats['visual']}/{stats['total']} ({ratio:.0%})")
+    print(f"सही फ़ुटेज वाले सीन: {stats['visual']:g}/{stats['total']} ({ratio:.0%})")
     privacy = None
     if ratio < min_ratio:
         action = CFG.get("low_quality_action", "skip")
         if action != "private":
-            summary(f"⏭️ वीडियो अपलोड नहीं किया: सिर्फ़ {stats['visual']}/{stats['total']} सीन में "
+            summary(f"⏭️ वीडियो अपलोड नहीं किया: सिर्फ़ {stats['visual']:g}/{stats['total']} सीन में "
                     f"सही फ़ुटेज मिली (कम से कम {min_ratio:.0%} चाहिए)। टाइटल: {title}\n\n"
                     "बेकार वीडियो डालने से बेहतर है आज कुछ न डालना। work/final.mp4 देखने के लिए "
                     "रन के Artifacts खोलें।")
@@ -1001,7 +1050,7 @@ def main():
         return
 
     vid = upload(video, title, description, tags, privacy)
-    summary(f"✅ अपलोड हो गया: https://youtube.com/shorts/{vid}  (सही फ़ुटेज {stats['visual']}/{stats['total']})")
+    summary(f"✅ अपलोड हो गया: https://youtube.com/shorts/{vid}  (सही फ़ुटेज {stats['visual']:g}/{stats['total']})")
     hist.append({"date": datetime.date.today().isoformat(), "title": title, "id": vid})
     save_hist(hist)
 
