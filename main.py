@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+`${{ secrets.PEXELS_API_KEY }}`# -*- coding: utf-8 -*-
 """
 Auto Shorts maker v3
 ====================
@@ -70,6 +70,15 @@ def load_cfg():
 
 
 CFG = load_cfg()
+
+
+def get_key(name):
+    """चाबी पहले GitHub Secret (env) से, न मिले तो config.json से (छोटे अक्षरों वाले नाम से)।
+    आगे-पीछे की ख़ाली जगह/नई लाइन अपने-आप हटा देता है।"""
+    v = (os.environ.get(name) or "").strip()
+    if not v:
+        v = str(CFG.get(name.lower(), "") or "").strip()
+    return v
 WORK = ROOT / "work"
 HIST = ROOT / "state" / "history.json"
 W, H = 1080, 1920
@@ -550,7 +559,7 @@ def _img_from_bytes(content):
 
 
 def pexels_videos(query):
-    key = os.environ.get("PEXELS_API_KEY")
+    key = get_key("PEXELS_API_KEY")
     if not key or not query:
         return []
     out = []
@@ -578,7 +587,7 @@ def pexels_videos(query):
 
 
 def pixabay_videos(query):
-    key = os.environ.get("PIXABAY_API_KEY")
+    key = get_key("PIXABAY_API_KEY")
     if not key or not query:
         return []
     out = []
@@ -700,7 +709,7 @@ def commons_photo(query):
 
 
 def pexels_photo(query):
-    key = os.environ.get("PEXELS_API_KEY")
+    key = get_key("PEXELS_API_KEY")
     words = qwords(query)
     if not key or not words:
         return None
@@ -983,15 +992,53 @@ def clean_tags(tags):
     return out
 
 
+def _test_pixabay(key):
+    try:
+        r = requests.get("https://pixabay.com/api/videos/",
+                         params={"key": key, "q": "cinema", "per_page": 3}, timeout=25)
+        if r.status_code == 200:
+            return True, f"चल रही है ({r.json().get('totalHits', 0)} वीडियो मिले)"
+        return False, f"काम नहीं कर रही (HTTP {r.status_code}: {r.text[:50]!r})"
+    except Exception as e:
+        return False, f"जाँच नहीं हो सकी ({str(e)[:50]})"
+
+
+def _test_pexels(key):
+    try:
+        r = requests.get("https://api.pexels.com/videos/search",
+                         headers={"Authorization": key},
+                         params={"query": "cinema", "per_page": 1}, timeout=25)
+        if r.status_code == 200:
+            return True, "चल रही है"
+        return False, f"काम नहीं कर रही (HTTP {r.status_code})"
+    except Exception as e:
+        return False, f"जाँच नहीं हो सकी ({str(e)[:50]})"
+
+
 def key_status():
-    """कौन-सी चाबियाँ (Secrets) मिलीं: सिर्फ़ हाँ/नहीं छापता, कीमत कभी नहीं।"""
-    names = ["GEMINI_API_KEY", "PEXELS_API_KEY", "PIXABAY_API_KEY",
-             "YT_REFRESH_TOKEN", "YT_CLIENT_ID", "YT_CLIENT_SECRET"]
-    st = {n: bool(os.environ.get(n)) for n in names}
+    """कौन-सी चाबियाँ मिलीं और वीडियो वाली चाबियाँ सचमुच चलती हैं या नहीं।
+    सिर्फ़ हाँ/नहीं और लंबाई छापता है, चाबी की कीमत कभी नहीं।"""
     print("चाबियों की स्थिति:")
-    for n, v in st.items():
-        print(f"  {n}: {'✅ मिली' if v else '❌ नहीं मिली'}")
-    return st
+    usable = {}
+    for n in ["GEMINI_API_KEY", "PEXELS_API_KEY", "PIXABAY_API_KEY",
+              "YT_REFRESH_TOKEN", "YT_CLIENT_ID", "YT_CLIENT_SECRET"]:
+        env_v = (os.environ.get(n) or "")
+        v = get_key(n)
+        if not v:
+            note = "(Secret मिला पर खाली है)" if n in os.environ else "(Secret/env में नहीं)"
+            print(f"  {n}: ❌ नहीं मिली {note}")
+            usable[n] = False
+            continue
+        src = "Secret" if env_v.strip() else "config.json"
+        extra = ""
+        ok = True
+        if n == "PIXABAY_API_KEY":
+            ok, extra = _test_pixabay(v)
+        elif n == "PEXELS_API_KEY":
+            ok, extra = _test_pexels(v)
+        print(f"  {n}: {'✅' if ok else '⚠️'} मिली ({src}, {len(v)} अक्षर) {extra}".rstrip())
+        usable[n] = ok
+    return usable
 
 
 def main():
@@ -999,9 +1046,11 @@ def main():
     keys = key_status()
     if not keys["PEXELS_API_KEY"] and not keys["PIXABAY_API_KEY"]:
         summary("❌ रुक गया: असली वीडियो-फ़ुटेज के लिए PEXELS_API_KEY या PIXABAY_API_KEY "
-                "(दोनों मुफ़्त) चाहिए, पर दोनों नहीं मिलीं। इनके बिना सिर्फ़ फ़ोटो मिलती है और वीडियो बेकार बनता है।\n\n"
-                "GitHub रेपो -> Settings -> Secrets and variables -> Actions -> New repository secret में "
-                "जोड़ें, और workflow की env सूची में भी इन्हें `${{ secrets.PEXELS_API_KEY }}` की तरह लिखें।")
+                "(दोनों मुफ़्त) चाहिए, पर कोई भी चलती हुई नहीं मिली। ऊपर लॉग में हर चाबी की स्थिति देखें: "
+                "'नहीं मिली' = Secret नहीं पहुँचा, '⚠️ काम नहीं कर रही' = चाबी ग़लत/पुरानी है।\n\n"
+                "GitHub रेपो -> Settings -> Secrets and variables -> Actions में नाम बिल्कुल "
+                "PIXABAY_API_KEY रखें और नई चाबी चिपकाएँ। (आख़िरी उपाय: private रेपो में config.json में "
+                "\"pixabay_api_key\": \"...\" लिख सकते हैं।)")
         sys.exit(1)
     hist = load_hist()
     try:
