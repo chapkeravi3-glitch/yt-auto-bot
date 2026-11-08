@@ -1,4 +1,4 @@
-`${{ secrets.PEXELS_API_KEY }}`# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """
 Auto Shorts maker v3
 ====================
