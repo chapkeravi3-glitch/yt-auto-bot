@@ -1,3 +1,4 @@
+
 # -*- coding: utf-8 -*-
 """
 Auto Shorts maker v3 (API Key Free Version)
@@ -61,13 +62,13 @@ WORK = ROOT / "work"
 HIST = ROOT / "state" / "history.json"
 W, H = 1080, 1920
 FPS = 25
-UA = {"User-Agent": "yt-auto-bot/3.0 (https://github.com/chapkeravi3-glitch/yt-auto-bot; hobby project) 
+UA = {"User-Agent": "yt-auto-bot/3.0 (https://github.com/chapkeravi3-glitch/yt-auto-bot; hobby project) python-requests"}
+
 DEFAULT_MODELS = [
     "gemini-1.5-flash",
     "gemini-1.5-pro",
     "gemini-2.0-flash",
 ]
-
 
 PALETTES = [
     ((30, 60, 140), (160, 50, 120)),
@@ -398,7 +399,6 @@ def compose_photo(img):
 def get_visual(scene, idx):
     queries = scene.get("queries") or ["background"]
     
-    # 1. पहले Wikimedia Commons से असली फ़ोटो की कोशिश करेंगे
     for q in queries:
         img = commons_photo(q)
         if img:
@@ -406,12 +406,10 @@ def get_visual(scene, idx):
             compose_photo(img).save(p, quality=92)
             return "image", p, 1
 
-    # 2. दूसरा विकल्प: अगर आपके 'clips/' फ़ोल्डर में कोई वीडियो है
     clip = local_clip()
     if clip:
         return "video", clip, 1
 
-    # 3. आख़िरी विकल्प: सुंदर रंगीन बैकग्राउंड (कभी फेल नहीं होगा)
     p = WORK / f"bg{idx}.jpg"
     gradient_bg().save(p, quality=92)
     return "image", p, 0.5
