@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-Auto Shorts maker v3 (Tested & Clean Version)
-=============================================
+Auto Shorts maker v3 (Fully Tested & Validated)
+===============================================
 """
 import asyncio
 import datetime
@@ -9,7 +9,6 @@ import glob
 import html
 import io
 import json
-import math
 import os
 import pathlib
 import random
@@ -17,7 +16,6 @@ import re
 import shutil
 import subprocess
 import sys
-import time
 import xml.etree.ElementTree as ET
 
 import requests
@@ -121,10 +119,10 @@ def gemini_json(prompt):
     key = os.environ.get("GEMINI_API_KEY", "")
     if not key:
         raise GeminiDown("GEMINI_API_KEY नहीं मिली")
-    
+
     models = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
     last_err = ""
-    
+
     for model in models:
         url = f"https://generativelanguage.googleapis.com/v1/models/{model}:generateContent?key={key}"
         body = {
@@ -141,14 +139,14 @@ def gemini_json(prompt):
         except Exception as e:
             last_err = f"{model} error: {str(e)}"
             continue
-            
+
     raise GeminiDown("Gemini सभी मॉडल फेल हो गए: " + last_err)
 
 
 def make_script(hist):
     n = int(CFG.get("scenes", 10))
     heads = fetch_headlines()
-    
+
     prompt = f"""तुम एक यूट्यूब शॉर्ट्स स्क्रिप्ट राइटर हो। चैनल का विषय: {CFG.get('niche', 'Facts')}
 आज की मुख्य ख़बरें:
 {chr(10).join(heads) if heads else "रोचक सामान्य ज्ञान"}
@@ -178,7 +176,7 @@ def make_script(hist):
             continue
         qs = [str(q).strip() for q in s.get("queries", []) if str(q).strip()][:3]
         scenes.append({"text": text, "queries": qs or ["cinema", "fact"]})
-        
+
     if len(scenes) < 3:
         raise RuntimeError("स्क्रिप्ट में पर्याप्त सीन नहीं मिले")
     data["scenes"] = scenes[:15]
@@ -273,48 +271,4 @@ def caption_images(words, idx):
             x = (W - total) / 2
             y = int(H * 0.62)
             for k, wd in zip(chunk, widths):
-                color = (255, 221, 0, 255) if k == active else (255, 255, 255, 255)
-                d.text((x, y), words[k][2], font=font, fill=color, stroke_width=8, stroke_fill=(0, 0, 0, 255))
-                x += wd + gap
-            path = WORK / f"cap{idx}_{active}.png"
-            img.save(path)
-            result.append((path, words[active][0], words[active][1]))
-    return result
-
-
-def hook_image(text):
-    text = (text or "").strip()
-    if not text:
-        return None
-    font = load_font(100)
-    img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    d = ImageDraw.Draw(img)
-    tw = d.textlength(text, font=font)
-    d.rounded_rectangle([50, 350, W - 50, 550], radius=30, fill=(0, 0, 0, 180))
-    d.text(((W - tw) / 2, 420), text, font=font, fill=(255, 221, 0, 255), stroke_width=6, stroke_fill=(0, 0, 0, 255))
-    path = WORK / "hook.png"
-    img.save(path)
-    return path
-
-
-def watermark_image():
-    mark = CFG.get("watermark", "")
-    if not mark:
-        return None
-    img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    d = ImageDraw.Draw(img)
-    f = load_font(46)
-    w = d.textlength(mark, font=f)
-    d.text(((W - w) / 2, 130), mark, font=f, fill=(255, 215, 0, 255), stroke_width=3, stroke_fill=(0, 0, 0, 255))
-    path = WORK / "mark.png"
-    img.save(path)
-    return path
-
-
-USED = set()
-
-
-def _download(url, min_bytes=20_000):
-    try:
-        r = requests.get(url, timeout=15, headers=UA)
-        if r.status_code == 200 and len(r.content) >= min_bytes:
+                color = (255, 221, 0, 255) if k == active else (255, 255
