@@ -1,11 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-Auto Shorts maker v3 (Ultimate Clean Version)
+Auto Shorts maker v3 (Tested & Clean Version)
 =============================================
-  -> Gemini API (Direct & Correct Endpoint)
-  -> edge-tts (हिंदी आवाज़) + शब्द-दर-शब्द चमकते कैप्शन + हुक-टेक्स्ट
-  -> Wikimedia Commons फ़ोटो और Local Clips
-  -> YouTube upload. GitHub Actions पर बिना रुकावट के चलता है।
 """
 import asyncio
 import datetime
@@ -25,7 +21,7 @@ import time
 import xml.etree.ElementTree as ET
 
 import requests
-from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps, features
+from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
 
 ROOT = pathlib.Path(__file__).resolve().parent
 
@@ -266,4 +262,59 @@ def caption_images(words, idx):
             font = load_font(size)
             probe = ImageDraw.Draw(Image.new("RGBA", (10, 10)))
             gap = max(int(size * 0.28), 10)
-            widths =
+            widths = [probe.textlength(words[k][2], font=font) for k in chunk]
+            total = sum(widths) + gap * (len(chunk) - 1)
+            if total <= W - 110 or size <= 50:
+                break
+            size -= 6
+        for active in chunk:
+            img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+            d = ImageDraw.Draw(img)
+            x = (W - total) / 2
+            y = int(H * 0.62)
+            for k, wd in zip(chunk, widths):
+                color = (255, 221, 0, 255) if k == active else (255, 255, 255, 255)
+                d.text((x, y), words[k][2], font=font, fill=color, stroke_width=8, stroke_fill=(0, 0, 0, 255))
+                x += wd + gap
+            path = WORK / f"cap{idx}_{active}.png"
+            img.save(path)
+            result.append((path, words[active][0], words[active][1]))
+    return result
+
+
+def hook_image(text):
+    text = (text or "").strip()
+    if not text:
+        return None
+    font = load_font(100)
+    img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    tw = d.textlength(text, font=font)
+    d.rounded_rectangle([50, 350, W - 50, 550], radius=30, fill=(0, 0, 0, 180))
+    d.text(((W - tw) / 2, 420), text, font=font, fill=(255, 221, 0, 255), stroke_width=6, stroke_fill=(0, 0, 0, 255))
+    path = WORK / "hook.png"
+    img.save(path)
+    return path
+
+
+def watermark_image():
+    mark = CFG.get("watermark", "")
+    if not mark:
+        return None
+    img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    f = load_font(46)
+    w = d.textlength(mark, font=f)
+    d.text(((W - w) / 2, 130), mark, font=f, fill=(255, 215, 0, 255), stroke_width=3, stroke_fill=(0, 0, 0, 255))
+    path = WORK / "mark.png"
+    img.save(path)
+    return path
+
+
+USED = set()
+
+
+def _download(url, min_bytes=20_000):
+    try:
+        r = requests.get(url, timeout=15, headers=UA)
+        if r.status_code == 200 and len(r.content) >= min_bytes:
