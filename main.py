@@ -61,13 +61,11 @@ WORK = ROOT / "work"
 HIST = ROOT / "state" / "history.json"
 W, H = 1080, 1920
 FPS = 25
-UA = {"User-Agent": "yt-auto-bot/3.0 (https://github.com/chapkeravi3-glitch/yt-auto-bot; hobby project) python-requests"}
-
+UA = {"User-Agent": "yt-auto-bot/3.0 (https://github.com/chapkeravi3-glitch/yt-auto-bot; hobby project) 
 DEFAULT_MODELS = [
     "gemini-1.5-flash",
-    "gemini-2.5-flash",
+    "gemini-1.5-pro",
     "gemini-2.0-flash",
-    "gemini-flash-latest",
 ]
 
 
