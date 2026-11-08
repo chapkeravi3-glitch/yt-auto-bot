@@ -1,15 +1,11 @@
-
 # -*- coding: utf-8 -*-
 """
-Auto Shorts maker v3 (API Key Free Version)
-===========================================
-  -> Gemini / Pollinations (स्क्रिप्ट के लिए)
-  -> edge-tts (हिंदी आवाज़) + शब्द-दर-शब्द चमकते कैप्शन + शुरू में बड़ा हुक-टेक्स्ट
-  -> बिना किसी Pexels/Pixabay key के:
-       1. Wikimedia Commons (मुफ़्त-लाइसेंस वाली असली फ़ोटो)
-       2. Local Clips (`clips/` फ़ोल्डर से वीडियो/क्लिप)
-       3. सुंदर रंगीन ग्रेडिएंट बैकग्राउंड (आख़िरी विकल्प)
-  -> YouTube upload. GitHub Actions पर बिना किसी रुकावट के चलता है।
+Auto Shorts maker v3 (API Key Free Version + Pollinations Backup)
+=================================================================
+  -> Gemini / Pollinations (बैकअप के साथ स्क्रिप्ट के लिए)
+  -> edge-tts (हिंदी आवाज़) + शब्द-दर-शब्द चमकते कैप्शन + हुक-टेक्स्ट
+  -> Wikimedia Commons फ़ोटो और Local Clips
+  -> YouTube upload. GitHub Actions पर बिना रुकावट के चलता है।
 """
 import asyncio
 import datetime
@@ -39,12 +35,6 @@ def load_cfg():
     try:
         return json.loads(text)
     except json.JSONDecodeError as e:
-        try:
-            obj, end = json.JSONDecoder().raw_decode(text.lstrip())
-            if isinstance(obj, dict):
-                return obj
-        except Exception:
-            pass
         raise SystemExit(f"config.json में ग़लती है: लाइन {e.lineno}")
 
 
@@ -171,6 +161,7 @@ def gemini_json(prompt):
     key = os.environ.get("GEMINI_API_KEY", "")
     if not key:
         raise GeminiDown("GEMINI_API_KEY नहीं मिली")
+    last_err = ""
     for model in DEFAULT_MODELS:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
         try:
@@ -179,9 +170,25 @@ def gemini_json(prompt):
             if r.status_code == 200:
                 txt = r.json()["candidates"][0]["content"]["parts"][0]["text"]
                 return _parse_json(txt)
-        except Exception:
+            else:
+                last_err = f"{model} HTTP {r.status_code}: {r.text[:100]}"
+                print("Gemini warning:", last_err)
+        except Exception as e:
+            last_err = f"{model} error: {str(e)}"
+            print("Gemini warning:", last_err)
             continue
-    raise GeminiDown("Gemini से स्क्रिप्ट नहीं मिली")
+    raise GeminiDown("Gemini सभी मॉडल फेल हो गए: " + last_err)
+
+
+def pollinations_json(prompt):
+    """मुफ़्त बैकअप AI (बिना किसी Key के)"""
+    r = requests.post(
+        "https://text.pollinations.ai/",
+        json={"messages": [{"role": "user", "content": prompt}], "model": "openai", "jsonMode": True},
+        headers=UA, timeout=60,
+    )
+    r.raise_for_status()
+    return _parse_json(r.text)
 
 
 def make_script(hist):
@@ -189,10 +196,16 @@ def make_script(hist):
     recent = "\n".join("- " + h["title"] for h in hist[-30:]) or "(अभी कोई नहीं)"
     heads = fetch_headlines()
     prompt = PROMPT_NEWS.format(niche=CFG["niche"], headlines="\n".join(heads) if heads else "सामान्य रोचक तथ्य", n=n, recent=recent)
+    
     try:
         data = gemini_json(prompt)
     except Exception as e:
-        raise GeminiDown(str(e))
+        print("Gemini नहीं चला, बैकअप AI (Pollinations) का उपयोग कर रहे हैं...", e)
+        try:
+            data = pollinations_json(prompt)
+        except Exception as e2:
+            raise GeminiDown(f"Gemini और Backup दोनों फेल हो गए: {e2}")
+
     scenes = []
     for s in data.get("scenes", []):
         text = str(s.get("text", "")).strip()
@@ -346,7 +359,6 @@ def _download(url, min_bytes=20_000):
 
 
 def commons_photo(query):
-    """Wikimedia Commons से मुफ़्त और असली फ़ोटो लेना"""
     params = {
         "action": "query", "format": "json", "generator": "search",
         "gsrsearch": f"{query} filetype:bitmap", "gsrnamespace": 6, "gsrlimit": 5,
@@ -370,7 +382,6 @@ def commons_photo(query):
 
 
 def local_clip():
-    """आपके 'clips/' फ़ोल्डर से लोकल वीडियो क्लिप चुनना"""
     files = []
     for ext in ("mp4", "mov", "webm", "mkv"):
         files += glob.glob(str(ROOT / "clips" / f"*.{ext}"))
@@ -398,7 +409,6 @@ def compose_photo(img):
 
 def get_visual(scene, idx):
     queries = scene.get("queries") or ["background"]
-    
     for q in queries:
         img = commons_photo(q)
         if img:
