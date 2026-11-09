@@ -9,6 +9,7 @@
   "watermark": "Fact India",
   "hashtags": ["#Shorts", "#Facts", "#FactIndia", "#RandomFacts", "#हिंदी"],
   "fallback_queries": ["earth from space", "milky way night sky", "ancient ruins", "forest aerial", "science laboratory equipment"],
-  "gemini_models": ["gemini-2.5-flash", "gemini-flash-latest", "gemini-flash-lite-latest"],
+  "gemini_models": ["gemini-3.8-flash", "gemini-flash-latest", "gemini-flash-lite-latest"],
   "pixabay_api_key": ""
 }
+
