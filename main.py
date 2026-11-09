@@ -90,10 +90,10 @@ FPS = 25
 # Wikimedia की नीति: पहचान और संपर्क वाला User-Agent चाहिए, वरना रोक देते हैं
 UA = {"User-Agent": "yt-auto-bot/3.0 (https://github.com/chapkeravi3-glitch/yt-auto-bot; hobby project) python-requests"}
 
+# Gemini के नाम बदलते रहते हैं और पुराने बंद हो जाते हैं। इसलिए नीचे discover_models() Google से
+# अभी चालू नाम पूछकर आगे रखता है। यह सूची सिर्फ़ आख़िरी सहारा है।
 DEFAULT_MODELS = [
-    "gemini-2.5-flash",
-    "gemini-2.5-flash-lite",
-    "gemini-2.0-flash",
+    "gemini-3.8-flash",
     "gemini-flash-latest",
     "gemini-flash-lite-latest",
 ]
@@ -241,20 +241,75 @@ def _retry_delay(text):
     return float(m.group(1)) if m else 0.0
 
 
+def discover_models(key):
+    """Google से अभी उपलब्ध flash मॉडल (नए संस्करण पहले)। न मिले तो ख़ाली सूची।"""
+    try:
+        r = requests.get("https://generativelanguage.googleapis.com/v1beta/models",
+                         params={"pageSize": 100}, headers={"x-goog-api-key": key}, timeout=30)
+        if r.status_code != 200:
+            print(f"मॉडल-सूची नहीं मिली (HTTP {r.status_code})")
+            return []
+        names = []
+        for m in r.json().get("models", []):
+            n = m.get("name", "").replace("models/", "")
+            low = n.lower()
+            if "generateContent" not in (m.get("supportedGenerationMethods") or []):
+                continue
+            if "flash" not in low:
+                continue
+            if any(x in low for x in ("image", "tts", "live", "audio", "embedding", "thinking",
+                                      "robotics", "computer", "vision", "learnlm", "gemma")):
+                continue
+            names.append(n)
+
+        def rank(n):
+            nums = re.findall(r"\d+(?:\.\d+)?", n)
+            v = float(nums[0]) if nums else 0.0
+            return (-v, "lite" in n.lower(), "preview" in n.lower() or "exp" in n.lower())
+
+        names.sort(key=rank)
+        return names[:5]
+    except Exception as e:
+        print("मॉडल-सूची issue:", str(e)[:80])
+        return []
+
+
+def build_model_list(key):
+    """config के नाम (अगर चालू हैं) -> Google की चालू सूची -> आख़िर में बाक़ी (शायद बंद) नाम।"""
+    cfg_models = list(CFG.get("gemini_models") or [])
+    live = discover_models(key)
+    out = []
+
+    def add(m):
+        if m and m not in out:
+            out.append(m)
+
+    if live:
+        for m in cfg_models:
+            if m in live:
+                add(m)
+        for m in live:
+            add(m)
+    for m in cfg_models + DEFAULT_MODELS:
+        add(m)
+    print("Gemini मॉडल क्रम:", ", ".join(out[:6]))
+    return out
+
+
 def gemini_json(prompt):
-    key = os.environ.get("GEMINI_API_KEY", "")
+    key = os.environ.get("GEMINI_API_KEY", "").strip()
     if not key:
         raise GeminiDown("GEMINI_API_KEY नहीं मिली")
-    models = list(CFG.get("gemini_models") or [])
-    for m in DEFAULT_MODELS:  # हर मॉडल का कोटा अलग होता है, इसलिए सब बारी-बारी से
-        if m not in models:
-            models.append(m)
+    models = build_model_list(key)
     body = {
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {"temperature": 1.0, "responseMimeType": "application/json"},
     }
-    last = ""
-    for model in models:
+    last, codes = "", []
+    i = 0
+    while i < len(models):
+        model = models[i]
+        i += 1
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
         for attempt in range(3):
             try:
@@ -264,6 +319,7 @@ def gemini_json(prompt):
                 )
             except Exception as e:
                 last = f"{model}: {e}"
+                codes.append(0)
                 time.sleep(4)
                 continue
             if r.status_code == 200:
@@ -273,9 +329,15 @@ def gemini_json(prompt):
                 except Exception as e:
                     last = f"{model} parse error: {e}"
                     continue
+            codes.append(r.status_code)
             last = f"{model} {r.status_code}: {r.text[:160]}"
             print("Gemini issue:", last)
             if r.status_code in (400, 404):
+                # Google अक्सर बताता है कि नया नाम क्या है: "use models/XYZ"
+                hint = re.search(r"use models/([\w.\-]+)", r.text or "")
+                if hint and hint.group(1) not in models:
+                    models.insert(i, hint.group(1))
+                    print("सुझाया गया नया मॉडल आज़माएँगे:", hint.group(1))
                 break
             if r.status_code == 429:
                 delay = _retry_delay(r.text)
@@ -285,6 +347,10 @@ def gemini_json(prompt):
                     continue
                 break
             time.sleep(6 * (attempt + 1))  # 500/503: थोड़ा रुककर
+    if codes and all(c in (400, 404) for c in codes):
+        # सिर्फ़ "मॉडल नहीं मिला" वाले जवाब: यह कोटे/भीड़ की नहीं, नाम की समस्या है
+        raise RuntimeError("Gemini के सारे मॉडल-नाम बंद/ग़लत हैं। config में gemini_models में "
+                           "चालू नाम लिखें (जैसे gemini-3.8-flash)। आख़िरी जवाब: " + last)
     raise GeminiDown("Gemini से स्क्रिप्ट नहीं मिली: " + last)
 
 
@@ -292,8 +358,7 @@ def pollinations_json(prompt):
     """Gemini न चले तो मुफ़्त बैकअप (बिना key)।"""
     r = requests.post(
         "https://text.pollinations.ai/",
-        json={"messages": [{"role": "user", "content": prompt}], "model": "openai",
-              "jsonMode": True},
+        json={"messages": [{"role": "user", "content": prompt}], "model": "openai"},
         headers=UA, timeout=120,
     )
     r.raise_for_status()
@@ -1298,6 +1363,11 @@ def key_status():
 def main():
     dry = os.environ.get("DRY_RUN") == "1"
     keys = key_status()
+    for n in ("PEXELS_API_KEY", "PIXABAY_API_KEY"):
+        if not keys[n] and (os.environ.get(n) or CFG.get(n.lower())):
+            print(f"ℹ️ {n} काम नहीं कर रही, इसलिए इस रन में छोड़ दी गई (वीडियो फ़ोटो + कार्ड से बनेगा)")
+            os.environ.pop(n, None)
+            CFG.pop(n.lower(), None)
     if not keys["PEXELS_API_KEY"] and not keys["PIXABAY_API_KEY"]:
         print("ℹ️ वीडियो-क्लिप की कोई key नहीं: असली फ़ोटो (Commons/Openverse) + टेक्स्ट-कार्ड वाला तरीक़ा चलेगा।")
     hist = load_hist()
