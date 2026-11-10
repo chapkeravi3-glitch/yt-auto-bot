@@ -1,4 +1,3 @@
-
 # -*- coding: utf-8 -*-
 """
 Auto Shorts maker v3
@@ -847,6 +846,216 @@ def commons_photo(query, ratio=0.6):
     return None
 
 
+OPEN_COUNT = [0]  # इस वीडियो में अब तक कितनी खुली क्लिप लगीं
+
+
+def _save_clip(data, ext):
+    p = WORK / f"oclip_{random.randint(1, 10**9)}{ext}"
+    p.write_bytes(data)
+    return p
+
+
+def nasa_clip(query):
+    """NASA की वीडियो (आम तौर पर बिना कॉपीराइट), बिना key। लौटाता है (path, credit) या None।"""
+    if "nasa" in DISABLED:
+        return None
+    words = qwords(query)
+    if not words:
+        return None
+    need = max(1, math.ceil(len(words) * 0.5))
+    try:
+        r = requests.get("https://images-api.nasa.gov/search",
+                         params={"q": query, "media_type": "video"}, headers=UA, timeout=30)
+        if r.status_code != 200:
+            print(f"nasa issue: HTTP {r.status_code}")
+            if r.status_code in (403, 429):
+                DISABLED.add("nasa")
+            return None
+        items = r.json().get("collection", {}).get("items", [])
+    except Exception as e:
+        print("nasa issue:", str(e)[:80])
+        return None
+    cands = []
+    for it in items[:30]:
+        d = (it.get("data") or [{}])[0]
+        nid = d.get("nasa_id", "")
+        text = (f"{d.get('title', '')} {(d.get('description') or '')[:300]} "
+                f"{' '.join(d.get('keywords') or [])}")
+        sc = match_score(words, text)
+        if sc >= need and it.get("href") and nid and nid not in USED:
+            cands.append((sc, it, d))
+    cands.sort(key=lambda x: -x[0])
+    for _, it, d in cands[:3]:
+        try:
+            files = requests.get(it["href"], headers=UA, timeout=30).json()
+        except Exception:
+            continue
+        urls = [u for u in files if isinstance(u, str) and u.lower().endswith(".mp4")]
+        pick = None
+        for tag in ("~medium.mp4", "~large.mp4", "~small.mp4"):
+            pick = next((u for u in urls if u.endswith(tag)), None)
+            if pick:
+                break
+        if not pick:
+            continue
+        data = _download(pick.replace("http://", "https://"), min_bytes=100_000,
+                         max_bytes=45_000_000)
+        if data:
+            USED.add(d.get("nasa_id"))
+            return _save_clip(data, ".mp4"), f"NASA: {str(d.get('title', ''))[:100]}"
+    return None
+
+
+def commons_clip(query):
+    """Wikimedia Commons की खुले लाइसेंस वाली वीडियो। लौटाता है (path, credit) या None।"""
+    if "commons" in DISABLED:
+        return None
+    words = qwords(query)
+    if not words:
+        return None
+    need = max(1, math.ceil(len(words) * 0.5))
+    params = {
+        "action": "query", "format": "json", "generator": "search",
+        "gsrsearch": f"{query} filetype:video", "gsrnamespace": 6, "gsrlimit": 15,
+        "prop": "imageinfo", "iiprop": "url|mime|size|extmetadata",
+    }
+    try:
+        r = requests.get("https://commons.wikimedia.org/w/api.php", params=params,
+                         headers=UA, timeout=30)
+        if r.status_code != 200:
+            print(f"commons-video issue: HTTP {r.status_code}")
+            if r.status_code in (403, 429):
+                DISABLED.add("commons")
+            return None
+        pages = r.json().get("query", {}).get("pages", {})
+    except Exception as e:
+        print("commons-video issue:", str(e)[:80])
+        return None
+    cands = []
+    for page in pages.values():
+        info = (page.get("imageinfo") or [{}])[0]
+        mime = info.get("mime", "")
+        size = info.get("size", 0) or 0
+        if not mime.startswith("video/") or not size or size > 45_000_000:
+            continue
+        meta = info.get("extmetadata") or {}
+        lic = (meta.get("LicenseShortName") or {}).get("value", "")
+        if not _license_ok(lic):
+            continue
+        desc = re.sub(r"<[^>]+>", " ", (meta.get("ImageDescription") or {}).get("value", ""))
+        title = page.get("title", "").replace("File:", "")
+        sc = match_score(words, f"{title} {desc}")
+        url = info.get("url")
+        if sc >= need and url and url not in USED:
+            artist = re.sub(r"<[^>]+>", "", (meta.get("Artist") or {}).get("value", "")).strip()
+            cands.append((sc, url, mime, f"{title} - {artist or 'Wikimedia Commons'} ({lic})"))
+    cands.sort(key=lambda x: -x[0])
+    for _, url, mime, credit in cands[:2]:
+        data = _download(url, min_bytes=100_000, max_bytes=45_000_000)
+        if data:
+            ext = ".webm" if "webm" in mime else (".ogv" if "ogg" in mime else ".mp4")
+            USED.add(url)
+            return _save_clip(data, ext), credit[:200]
+    return None
+
+
+def _archive_license_ok(u):
+    low = (u or "").lower()
+    if "creativecommons.org" not in low:
+        return False
+    if re.search(r"/licenses/by-(nc|nd)", low):
+        return False
+    return "/publicdomain/" in low or "/licenses/by/" in low or "/licenses/by-sa/" in low
+
+
+def archive_clip(query):
+    """Internet Archive की खुले लाइसेंस (CC BY / BY-SA / पब्लिक डोमेन) वाली वीडियो।"""
+    if "archive" in DISABLED:
+        return None
+    words = qwords(query)
+    if not words:
+        return None
+    need = max(1, math.ceil(len(words) * 0.5))
+    try:
+        r = requests.get("https://archive.org/advancedsearch.php", params={
+            "q": f"({query}) AND mediatype:movies", "rows": 25, "output": "json",
+            "fl[]": ["identifier", "title", "licenseurl", "description"],
+        }, headers=UA, timeout=40)
+        if r.status_code != 200:
+            print(f"archive issue: HTTP {r.status_code}")
+            if r.status_code in (403, 429):
+                DISABLED.add("archive")
+            return None
+        docs = r.json().get("response", {}).get("docs", [])
+    except Exception as e:
+        print("archive issue:", str(e)[:80])
+        return None
+    cands = []
+    for d in docs:
+        lic = d.get("licenseurl") or ""
+        if isinstance(lic, list):
+            lic = lic[0] if lic else ""
+        if not _archive_license_ok(lic):
+            continue
+        desc = d.get("description") or ""
+        if isinstance(desc, list):
+            desc = " ".join(map(str, desc))
+        desc = re.sub(r"<[^>]+>", " ", str(desc))[:300]
+        title = d.get("title") or ""
+        if isinstance(title, list):
+            title = " ".join(map(str, title))
+        sc = match_score(words, f"{title} {desc}")
+        ident = d.get("identifier")
+        if sc >= need and ident and ident not in USED:
+            cands.append((sc, ident, str(title), lic))
+    cands.sort(key=lambda x: -x[0])
+    for _, ident, title, lic in cands[:2]:
+        try:
+            meta = requests.get(f"https://archive.org/metadata/{ident}", headers=UA, timeout=30).json()
+        except Exception:
+            continue
+        mp4 = []
+        for f in meta.get("files", []):
+            try:
+                size = int(f.get("size", 0) or 0)
+            except Exception:
+                continue
+            if str(f.get("name", "")).lower().endswith(".mp4") and 100_000 < size <= 45_000_000:
+                mp4.append((size, f["name"]))
+        if not mp4:
+            continue
+        name = max(mp4)[1]
+        data = _download(f"https://archive.org/download/{ident}/{requests.utils.quote(name)}",
+                         min_bytes=100_000, max_bytes=45_000_000)
+        if data:
+            USED.add(ident)
+            kind = lic.split("creativecommons.org/")[-1].strip("/")[:30]
+            return _save_clip(data, ".mp4"), f"{title[:90]} - Internet Archive ({kind})"
+    return None
+
+
+def open_clip(queries):
+    """खुले लाइसेंस की छोटी क्लिप। लौटाता है (path, query, credit) या None।"""
+    if not CFG.get("use_open_clips", True):
+        return None
+    limit = int(CFG.get("max_open_clips", 14 if LONG else 4))
+    if OPEN_COUNT[0] >= limit:
+        return None
+    order = CFG.get("clip_sources") or ["commons", "archive", "nasa"]
+    fns = {"nasa": nasa_clip, "commons": commons_clip, "archive": archive_clip}
+    for q in queries[:2]:
+        for name in order:
+            fn = fns.get(name)
+            if not fn:
+                continue
+            got = fn(q)
+            if got:
+                OPEN_COUNT[0] += 1
+                print(f"  खुले लाइसेंस की क्लिप ({name}) | {q}")
+                return got[0], q, got[1]
+    return None
+
+
 def pexels_photo(query):
     key = get_key("PEXELS_API_KEY")
     words = qwords(query)
@@ -1006,13 +1215,34 @@ def gradient_bg():
     return ImageOps.colorize(g, c1, c2).convert("RGB")
 
 
-def local_clip():
-    if not CFG.get("use_local_clips", False):
-        return None
+def local_clip(queries=None):
+    """रेपो के clips/ फ़ोल्डर की अपनी क्लिप। फ़ाइल-नाम में खोज-शब्द मिलें तो वही ली जाती है
+    (जैसे cinema_hall.mp4)। credits.json में {"फ़ाइल.mp4": "credit"} लिखा हो तो विवरण में जुड़ता है।
+    लौटाता है (path, credit) या None। queries=None हो तो use_local_clips चालू होने पर कोई भी।"""
+    folder = ROOT / str(CFG.get("clips_dir", "clips"))
     files = []
     for ext in ("mp4", "mov", "webm", "mkv"):
-        files += glob.glob(str(ROOT / "clips" / f"*.{ext}"))
-    return pathlib.Path(random.choice(files)) if files else None
+        files += glob.glob(str(folder / f"*.{ext}"))
+    if not files:
+        return None
+    try:
+        credits = json.loads((folder / "credits.json").read_text(encoding="utf-8"))
+    except Exception:
+        credits = {}
+    if queries:
+        best = None
+        for f in files:
+            name = re.sub(r"[_\-.]+", " ", pathlib.Path(f).stem.lower())
+            sc = max((match_score(qwords(q), name) for q in queries), default=0)
+            if sc >= 1 and (best is None or sc > best[0]):
+                best = (sc, f)
+        if best:
+            return pathlib.Path(best[1]), credits.get(pathlib.Path(best[1]).name)
+        return None
+    if CFG.get("use_local_clips", False):
+        f = random.choice(files)
+        return pathlib.Path(f), credits.get(pathlib.Path(f).name)
+    return None
 
 
 PERSON_WORDS = set("""man men woman women actor actress celebrity celebrities star stars person people
@@ -1074,12 +1304,26 @@ def get_visual(scene, idx, fallbacks=()):
             return "video", got[0], 1, None, {"query": got[1]}
         return None
 
+    def try_local(qs):
+        got = local_clip(qs)
+        if got:
+            print(f"  अपनी क्लिप (clips/) | {got[0].name}")
+            return "video", got[0], 1, got[1], {"query": qs[0] if qs else ""}
+        return None
+
+    def try_open(qs):
+        got = open_clip(qs)
+        if got:
+            return "video", got[0], 1, got[2], {"query": got[1], "open": True}
+        return None
+
     safe = [q for q in queries if person_free(q)]
     if kind == "photo":
-        r = (try_photos(queries, named, False) or try_video(queries)
-             or try_photos(safe, extra, True))
+        r = (try_local(queries) or try_photos(queries, named, False) or try_video(queries)
+             or try_open(queries) or try_photos(safe, extra, True))
     else:
-        r = try_video(queries) or try_photos(safe, generic, True) or try_photos(safe, extra, True)
+        r = (try_local(queries) or try_video(queries) or try_open(queries)
+             or try_photos(safe, generic, True) or try_photos(safe, extra, True))
     if r:
         return r
 
@@ -1087,15 +1331,15 @@ def get_visual(scene, idx, fallbacks=()):
     fb = [q for q in fallbacks if q and person_free(q)]
     random.shuffle(fb)
     for q in fb[:2]:
-        r = try_video([q]) or try_photos([q], generic, True)
+        r = try_video([q]) or try_open([q]) or try_photos([q], generic, True)
         if r:
             print("  (विषय से जुड़ी आम फ़ोटो/क्लिप)")
             return r
 
-    clip = local_clip()
-    if clip:
-        print("  अपनी क्लिप (clips/ फ़ोल्डर)")
-        return "video", clip, 0.6, None, {}
+    got = local_clip(None)
+    if got:
+        print("  अपनी क्लिप (clips/ फ़ोल्डर, कोई भी)")
+        return "video", got[0], 0.6, got[1], {}
     return make_card(scene, idx)
 
 
@@ -1306,6 +1550,7 @@ def build_video(script):
     USED.clear()
     CLIP_POOL.clear()
     DISABLED.clear()
+    OPEN_COUNT[0] = 0
     if not features.check("raqm"):
         print("चेतावनी: raqm नहीं मिला, हिंदी मात्राएँ थोड़ी बिगड़ सकती हैं")
     mark = watermark_image()
