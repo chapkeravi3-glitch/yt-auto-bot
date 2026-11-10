@@ -1,3 +1,4 @@
+
 # -*- coding: utf-8 -*-
 """
 Auto Shorts maker v3
@@ -85,8 +86,14 @@ def get_key(name):
 WORK = ROOT / "work"
 # दूसरे चैनल के लिए workflow में CONFIG_FILE और HIST_FILE बदलकर वही कोड चलाते हैं
 HIST = ROOT / os.environ.get("HIST_FILE", "state/history.json")
-W, H = 1080, 1920
+# VIDEO_FORMAT=long (workflow से) हो तो 16:9 का लंबा वीडियो, वरना खड़ा शॉर्ट
+LONG = ((os.environ.get("VIDEO_FORMAT") or CFG.get("format") or "short").strip().lower() == "long")
+W, H = (1920, 1080) if LONG else (1080, 1920)
 FPS = 25
+CAP_Y = 0.80 if LONG else 0.62                       # कैप्शन की ऊँचाई
+ORIENT = "landscape" if LONG else "portrait"          # फ़ुटेज/फ़ोटो की दिशा
+ZP = 1.25 if LONG else 1.5                            # ज़ूम के लिए बड़ी फ़्रेम का अनुपात
+ZW, ZH = int(W * ZP) // 2 * 2, int(H * ZP) // 2 * 2
 # Wikimedia की नीति: पहचान और संपर्क वाला User-Agent चाहिए, वरना रोक देते हैं
 UA = {"User-Agent": "yt-auto-bot/3.0 (https://github.com/chapkeravi3-glitch/yt-auto-bot; hobby project) python-requests"}
 
@@ -145,6 +152,47 @@ PROMPT_EVERGREEN = """तुम एक यूट्यूब शॉर्ट्�
 
 आज की ख़बरें नहीं मिल सकीं। इसलिए चैनल के विषय पर एक मशहूर, पक्का और जाँचा हुआ रोचक तथ्य चुनो और उस पर लगभग 35-50 सेकंड का शॉर्ट वीडियो बनाओ।
 """ + COMMON_RULES
+
+
+LONG_SHAPE = (
+    '{"title": "...", "thumb": "...", "description": "...", "tags": ["..."], '
+    '"fallback_queries": ["...", "..."], '
+    '"scenes": [{"text": "...", "chapter": "...", "punch": "...", "kind": "photo", "queries": ["...", "..."]}]}'
+)
+
+LONG_RULES = """
+सख़्त नियम:
+- भाषा: सरल बोलचाल की हिंदी (देवनागरी)।
+- सिर्फ़ पक्के, सर्वमान्य और जाँचे हुए तथ्य। अपनी तरफ़ से कोई नई बात, आँकड़ा, तारीख़ या बयान मत गढ़ो। अफ़वाह, विवाद, किसी की निजी ज़िंदगी या बदनामी वाली बात नहीं। जो पक्का न हो उसे "रिपोर्ट्स के मुताबिक" कहो या छोड़ दो।
+- कुल {n} सीन। हर सीन का text 16 से 24 शब्द का (दो छोटे वाक्य), बोलने में सहज।
+- संरचना: (1) पहले 3 सीन: ज़बरदस्त हुक, यानी वीडियो में क्या मिलेगा और सबसे चौंकाने वाली बात का इशारा। (2) फिर 6 से 8 हिस्से; हर हिस्से में एक पक्का तथ्य या कहानी 4-6 सीन में: पहले सवाल, फिर तथ्य, फिर "हैरानी वाली बात"। (3) बीच में एक बार "आगे सबसे अनोखी बात आने वाली है, रुके रहना"। (4) आख़िर में सार, दर्शकों से कमेंट में एक सवाल और सब्सक्राइब की छोटी अपील।
+- "chapter": हर हिस्से के पहले सीन में उस हिस्से का छोटा नाम (हिंदी, 2-5 शब्द)। सबसे पहले सीन में "परिचय"। बाक़ी सीन में "" (ख़ाली)।
+- "thumb": थंबनेल पर लिखने के लिए 3-5 शब्दों का सबसे चौंकाने वाला वाक्यांश।
+- हर सीन के लिए "kind" चुनो:
+  * "photo": जब बात किसी ख़ास व्यक्ति, जगह, फ़िल्म, घटना या चीज़ की हो। queries में उसका सही अंग्रेज़ी नाम लिखो।
+  * "stock": जब आम माहौल दिखाना हो। queries में सिर्फ़ चीज़ों, जगहों या माहौल के 2-3 अंग्रेज़ी शब्द, कभी किसी इंसान या चेहरे के नहीं।
+- हर सीन के "queries" में 2-3 अंग्रेज़ी विकल्प हों: पहला सबसे सटीक, बाद वाले ज़्यादा आम। जहाँ हो सके "photo" चुनो।
+- हर सीन का "punch": उस सीन का सबसे ज़रूरी 2-4 शब्द का वाक्यांश या आँकड़ा देवनागरी में।
+- "fallback_queries": 4-5 आम पर विषय से जुड़ी अंग्रेज़ी खोजें जिनमें कोई इंसान या चेहरा न हो।
+- title हिंदी में, 70 अक्षरों तक, जिज्ञासा जगाने वाला (#Shorts मत लिखो)। description 3-4 लाइन। tags 10-15।
+- ये टाइटल पहले बन चुके हैं, इनसे अलग नया विषय चुनो:
+{recent}
+
+सिर्फ़ यह JSON लौटाओ:
+""" + LONG_SHAPE.replace("{", "{{").replace("}", "}}")
+
+PROMPT_LONG_NEWS = """तुम एक यूट्यूब लंबे वीडियो (लगभग 5-7 मिनट) के स्क्रिप्ट राइटर हो। चैनल का विषय: {niche}
+
+नीचे आज की असली ख़बरें/ट्रेंड हैं:
+{headlines}
+
+इनमें से चैनल के विषय से जुड़ा सबसे दिलचस्प एक विषय चुनो और उस पर "टॉप 8-10 तथ्य" या "पूरी कहानी" वाली संरचना का लंबा वीडियो बनाओ। जो तथ्य ख़बरों में नहीं हैं, वे सिर्फ़ तभी लिखो जब बिल्कुल पक्के और मशहूर हों।
+""" + LONG_RULES
+
+PROMPT_LONG_EVERGREEN = """तुम एक यूट्यूब लंबे वीडियो (लगभग 5-7 मिनट) के स्क्रिप्ट राइटर हो। चैनल का विषय: {niche}
+
+आज की ख़बरें नहीं मिल सकीं। इसलिए चैनल के विषय पर एक मशहूर विषय चुनो और "टॉप 8-10 पक्के तथ्य" या "पूरी कहानी" वाली संरचना का लंबा वीडियो बनाओ।
+""" + LONG_RULES
 
 
 class GeminiDown(Exception):
@@ -305,6 +353,8 @@ def gemini_json(prompt):
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {"temperature": 1.0, "responseMimeType": "application/json"},
     }
+    if LONG:
+        body["generationConfig"]["maxOutputTokens"] = 16000  # लंबी स्क्रिप्ट कटे नहीं
     last, codes = "", []
     i = 0
     while i < len(models):
@@ -332,6 +382,10 @@ def gemini_json(prompt):
             codes.append(r.status_code)
             last = f"{model} {r.status_code}: {r.text[:160]}"
             print("Gemini issue:", last)
+            if (r.status_code == 400 and LONG and "maxOutputTokens" in body["generationConfig"]
+                    and "token" in (r.text or "").lower()):
+                del body["generationConfig"]["maxOutputTokens"]  # इस मॉडल की सीमा कम है
+                continue
             if r.status_code in (400, 404):
                 # Google अक्सर बताता है कि नया नाम क्या है: "use models/XYZ"
                 hint = re.search(r"use models/([\w.\-]+)", r.text or "")
@@ -366,14 +420,16 @@ def pollinations_json(prompt):
 
 
 def make_script(hist):
-    n = int(CFG.get("scenes", 12))
+    n = int(CFG.get("long_scenes", 40)) if LONG else int(CFG.get("scenes", 12))
     recent = "\n".join("- " + h["title"] for h in hist[-40:]) or "(अभी कोई नहीं)"
     heads = fetch_headlines()
+    tpl_news = PROMPT_LONG_NEWS if LONG else PROMPT_NEWS
+    tpl_ever = PROMPT_LONG_EVERGREEN if LONG else PROMPT_EVERGREEN
     if heads:
-        prompt = PROMPT_NEWS.format(niche=CFG["niche"], headlines="\n".join(heads),
-                                    n=n, recent=recent)
+        prompt = tpl_news.format(niche=CFG["niche"], headlines="\n".join(heads),
+                                 n=n, recent=recent)
     else:
-        prompt = PROMPT_EVERGREEN.format(niche=CFG["niche"], n=n, recent=recent)
+        prompt = tpl_ever.format(niche=CFG["niche"], n=n, recent=recent)
 
     try:
         data = gemini_json(prompt)
@@ -394,10 +450,12 @@ def make_script(hist):
         qs = [str(q).strip() for q in qs if str(q).strip()][:3]
         kind = "photo" if str(s.get("kind", "")).lower() == "photo" else "stock"
         punch = str(s.get("punch", "")).strip()[:40]
-        scenes.append({"text": text, "kind": kind, "queries": qs, "punch": punch})
-    if len(scenes) < 5:
+        chapter = str(s.get("chapter", "")).strip()[:40]
+        scenes.append({"text": text, "kind": kind, "queries": qs, "punch": punch,
+                       "chapter": chapter})
+    if len(scenes) < (20 if LONG else 5):
         raise RuntimeError("स्क्रिप्ट में सीन बहुत कम हैं")
-    data["scenes"] = scenes[:16]
+    data["scenes"] = scenes[:60 if LONG else 16]
     fb = [str(q).strip() for q in (data.get("fallback_queries") or []) if str(q).strip()]
     for q in CFG.get("fallback_queries", []):
         if q not in fb:
@@ -509,21 +567,21 @@ def caption_images(words, idx):
     result = []
     for start in range(0, n, 3):
         chunk = list(range(start, min(start + 3, n)))
-        size = 96
+        size = 84 if LONG else 96
         while True:
             font = load_font(size)
             probe = ImageDraw.Draw(Image.new("RGBA", (10, 10)))
             gap = max(int(size * 0.28), 10)
             widths = [probe.textlength(words[k][2], font=font) for k in chunk]
             total = sum(widths) + gap * (len(chunk) - 1)
-            if total <= W - 110 or size <= 50:
+            if total <= W - (230 if LONG else 110) or size <= 50:
                 break
             size -= 6
         for active in chunk:
             img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
             d = ImageDraw.Draw(img)
             x = (W - total) / 2
-            y = int(H * 0.62)
+            y = int(H * CAP_Y)
             for k, wd in zip(chunk, widths):
                 color = (255, 221, 0, 255) if k == active else (255, 255, 255, 255)
                 d.text((x, y), words[k][2], font=font, fill=color,
@@ -541,7 +599,7 @@ def hook_image(text):
     if not text:
         return None
     words = text.split()
-    size = 120
+    size = 100 if LONG else 120
     while True:
         font = load_font(size)
         probe = ImageDraw.Draw(Image.new("RGBA", (10, 10)))
@@ -560,7 +618,7 @@ def hook_image(text):
     img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
     lh = int(size * 1.35)
-    y = int(H * 0.20)
+    y = int(H * (0.12 if LONG else 0.20))
     pad = 36
     box_h = lh * len(lines) + pad
     d.rounded_rectangle([50, y - pad, W - 50, y - pad + box_h + pad],
@@ -583,7 +641,8 @@ def watermark_image():
     d = ImageDraw.Draw(img)
     f = load_font(46)
     w = d.textlength(mark, font=f)
-    d.text(((W - w) / 2, 130), mark, font=f, fill=(255, 215, 0, 255),
+    pos = (W - w - 60, 40) if LONG else ((W - w) / 2, 130)
+    d.text(pos, mark, font=f, fill=(255, 215, 0, 255),
            stroke_width=3, stroke_fill=(0, 0, 0, 255))
     path = WORK / "mark.png"
     img.save(path)
@@ -639,17 +698,20 @@ def pexels_videos(query):
         r = requests.get(
             "https://api.pexels.com/videos/search",
             headers={"Authorization": key},
-            params={"query": query, "orientation": "portrait", "per_page": 15},
+            params={"query": query, "orientation": ORIENT, "per_page": 15},
             timeout=30,
         )
         for v in r.json().get("videos", []):
             files = [f for f in v.get("video_files", [])
                      if f.get("file_type") == "video/mp4" and f.get("width") and f.get("height")]
-            portrait = [f for f in files if f["height"] >= f["width"] and f["width"] >= 540]
-            pool = portrait or [f for f in files if f["width"] >= 1280]
+            if LONG:
+                pool = [f for f in files if f["width"] >= f["height"] and f["width"] >= 1280]
+            else:
+                portrait = [f for f in files if f["height"] >= f["width"] and f["width"] >= 540]
+                pool = portrait or [f for f in files if f["width"] >= 1280]
             if not pool:
                 continue
-            best = max(pool, key=lambda f: min(f["width"], 1080))
+            best = max(pool, key=lambda f: min(f["width"], 1920 if LONG else 1080))
             slug = (v.get("url", "").rstrip("/").split("/")[-1]).replace("-", " ")
             out.append({"id": f"pexels{v.get('id')}", "url": best["link"],
                         "dur": float(v.get("duration") or 0), "text": slug})
@@ -794,14 +856,14 @@ def pexels_photo(query):
         r = requests.get(
             "https://api.pexels.com/v1/search",
             headers={"Authorization": key},
-            params={"query": query, "orientation": "portrait", "per_page": 15},
+            params={"query": query, "orientation": ORIENT, "per_page": 15},
             timeout=30,
         )
         photos = [p for p in r.json().get("photos", [])
                   if match_score(words, p.get("alt", "")) >= 1 and p["id"] not in USED]
         random.shuffle(photos)
         for p in photos[:3]:
-            data = _download(p["src"]["portrait"], min_bytes=20_000)
+            data = _download(p["src"][ORIENT], min_bytes=20_000)
             if data:
                 USED.add(p["id"])
                 return _img_from_bytes(data)
@@ -902,10 +964,10 @@ def card_image(text, idx):
     img = Image.alpha_composite(img, over)
     text = (text or "").strip()
     if text:
-        font, lines, size = fit_text(text, W - 160, 150, 70, 3)
+        font, lines, size = fit_text(text, W - (300 if LONG else 160), 170 if LONG else 150, 70, 3)
         d = ImageDraw.Draw(img)
         lh = int(size * 1.3)
-        y = int(H * 0.30) - (lh * len(lines)) // 2
+        y = int(H * (0.40 if LONG else 0.30)) - (lh * len(lines)) // 2
         for ln in lines:
             tw = d.textlength(ln, font=font)
             d.text(((W - tw) / 2, y), ln, font=font, fill=(255, 255, 255, 255),
@@ -919,6 +981,13 @@ def compose_photo(img):
     bg = ImageOps.fit(img, (W, H)).filter(ImageFilter.GaussianBlur(32))
     bg = Image.blend(bg, Image.new("RGB", (W, H), (0, 0, 0)), 0.45)
     iw, ih = img.size
+    if LONG:
+        if iw / ih >= 1.25:  # चौड़ी फ़ोटो: पूरी स्क्रीन भर दें
+            return Image.blend(ImageOps.fit(img, (W, H)), Image.new("RGB", (W, H), (0, 0, 0)), 0.12)
+        scale = H * 0.9 / ih  # खड़ी/चौकोर: धुंधली पृष्ठभूमि पर बीच में
+        fg = img.resize((max(1, int(iw * scale)), max(1, int(ih * scale))), Image.LANCZOS)
+        bg.paste(fg, ((W - fg.size[0]) // 2, (H - fg.size[1]) // 2))
+        return bg
     if ih / iw >= 1.5:  # पहले से खड़ी (portrait) फ़ोटो: पूरी स्क्रीन भर दें
         return Image.blend(ImageOps.fit(img, (W, H)),
                            Image.new("RGB", (W, H), (0, 0, 0)), 0.12)
@@ -1138,7 +1207,7 @@ def scene_video(kind, src, audio, out, d, overlays, mark):
                 f"format=yuv420p[bg]")
     else:
         inputs += ["-loop", "1", "-framerate", str(FPS), "-i", str(src)]
-        base = (f"[0:v]scale={W * 3 // 2}:{H * 3 // 2},"
+        base = (f"[0:v]scale={ZW}:{ZH},"
                 f"zoompan=z='min(1+0.0008*on,1.15)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
                 f":d=1:s={W}x{H}:fps={FPS},{grade},format=yuv420p[bg]")
     inputs += ["-i", str(audio)]
@@ -1173,6 +1242,62 @@ def pick_music():
     for ext in ("mp3", "m4a", "wav", "ogg"):
         files += glob.glob(str(ROOT / "music" / f"*.{ext}"))
     return pathlib.Path(random.choice(files)) if files else None
+
+
+def fmt_ts(sec):
+    m, s_ = divmod(int(sec), 60)
+    h, m = divmod(m, 60)
+    return f"{h}:{m:02d}:{s_:02d}" if h else f"{m}:{s_:02d}"
+
+
+def chapters_text(script, prep):
+    """YouTube के अध्याय (chapters): '0:00 परिचय' जैसी लाइनें। कम से कम 3 और हर एक 10 सेकंड से लंबा।"""
+    t, items = 0.0, []
+    for p in prep:
+        title = (p["sc"].get("chapter") or "").strip()
+        if title or not items and p["i"] == 0:
+            items.append((t, title or "परिचय"))
+        t += p["d"] + 0.35
+    items[0] = (0.0, items[0][1])
+    ok = [items[0]]
+    for sec, title in items[1:]:
+        if sec - ok[-1][0] >= 10:
+            ok.append((sec, title))
+    if len(ok) < 3:
+        return ""
+    return "\n".join(f"{fmt_ts(sec)} {title}" for sec, title in ok)
+
+
+def make_thumbnail(script, prep):
+    """लंबे वीडियो का थंबनेल (1280x720): असली फ़ोटो + बड़े अक्षरों में चौंकाने वाला वाक्यांश।"""
+    try:
+        base = None
+        for p in prep:
+            if p["kind"] == "image" and not p["meta"].get("card"):
+                base = Image.open(p["src"]).convert("RGB")
+                break
+        if base is None:
+            c1, c2 = random.choice(PALETTES)
+            g = Image.linear_gradient("L").resize((1280, 720))
+            base = ImageOps.colorize(g, c1, c2).convert("RGB")
+        base = ImageOps.fit(base, (1280, 720))
+        base = Image.blend(base, Image.new("RGB", (1280, 720), (0, 0, 0)), 0.38)
+        text = (script.get("thumb") or script.get("title") or "").strip()[:45]
+        if text:
+            font, lines, size = fit_text(text, 1040, 150, 80, 3)
+            d = ImageDraw.Draw(base)
+            lh = int(size * 1.28)
+            y = (720 - lh * len(lines)) // 2
+            for ln in lines:
+                d.text((70, y), ln, font=font, fill=(255, 221, 0),
+                       stroke_width=9, stroke_fill=(0, 0, 0))
+                y += lh
+        path = WORK / "thumb.jpg"
+        base.save(path, quality=88)
+        return path
+    except Exception as e:
+        print("थंबनेल नहीं बना:", str(e)[:100])
+        return None
 
 
 def build_video(script):
@@ -1259,11 +1384,13 @@ def build_video(script):
             "-b:a", "128k", "-movflags", "+faststart", str(final),
         ])
     print(f"वीडियो तैयार: {duration(final):.1f} सेकंड")
-    return final, {"total": len(scenes), "visual": ok_count, "credits": credits}
+    return final, {"total": len(scenes), "visual": ok_count, "credits": credits,
+                   "chapters": chapters_text(script, prep) if LONG else "",
+                   "thumb": make_thumbnail(script, prep) if LONG else None}
 
 
 # ---------------------------------------------------------------- upload
-def upload(video, title, description, tags, privacy=None):
+def upload(video, title, description, tags, privacy=None, thumb=None):
     from google.oauth2.credentials import Credentials
     from googleapiclient.discovery import build
     from googleapiclient.http import MediaFileUpload
@@ -1294,7 +1421,15 @@ def upload(video, title, description, tags, privacy=None):
     resp = None
     while resp is None:
         _, resp = req.next_chunk()
-    return resp["id"]
+    vid = resp["id"]
+    if thumb and os.path.exists(str(thumb)):
+        try:
+            yt.thumbnails().set(videoId=vid, media_body=MediaFileUpload(
+                str(thumb), mimetype="image/jpeg")).execute()
+            print("थंबनेल लगा दिया")
+        except Exception as e:
+            print("थंबनेल नहीं लगा (चैनल का फ़ोन-वेरिफ़िकेशन चाहिए हो सकता है):", str(e)[:120])
+    return vid
 
 
 # ---------------------------------------------------------------- main
@@ -1381,14 +1516,18 @@ def main():
     title = str(script.get("title", "रोचक फ़ैक्ट")).strip()
     if len(title) > 85:
         title = title[:85].rstrip()
-    if "#shorts" not in title.lower():
+    if not LONG and "#shorts" not in title.lower():
         title += " #Shorts"
     print("टाइटल:", title)
 
     video, stats = build_video(script)
 
-    hashtags = " ".join(CFG.get("hashtags", ["#Shorts"]))
-    description = str(script.get("description", "")).strip() + "\n\n" + hashtags
+    hashtags = " ".join(h for h in CFG.get("hashtags", ["#Shorts"])
+                        if not (LONG and h.lower() == "#shorts"))
+    description = str(script.get("description", "")).strip()
+    if stats.get("chapters"):
+        description += "\n\n" + stats["chapters"]
+    description += "\n\n" + hashtags
     if stats["credits"]:
         description += "\n\nफ़ोटो: " + " | ".join(stats["credits"][:6])
     description += "\n\nयह वीडियो AI की मदद से बनाया गया है।"
@@ -1414,10 +1553,12 @@ def main():
 
     if dry:
         print("DRY RUN: अपलोड नहीं किया। वीडियो:", video)
+        print("--- विवरण ---\n" + description + "\n-------------")
         return
 
-    vid = upload(video, title, description, tags, privacy)
-    summary(f"✅ अपलोड हो गया: https://youtube.com/shorts/{vid}  (सही फ़ुटेज {stats['visual']:g}/{stats['total']})")
+    vid = upload(video, title, description, tags, privacy, stats.get("thumb"))
+    link = f"https://youtu.be/{vid}" if LONG else f"https://youtube.com/shorts/{vid}"
+    summary(f"✅ अपलोड हो गया: {link}  (सही फ़ुटेज {stats['visual']:g}/{stats['total']})")
     hist.append({"date": datetime.date.today().isoformat(), "title": title, "id": vid})
     save_hist(hist)
 
