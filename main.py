@@ -120,7 +120,7 @@ JSON_SHAPE = (
 
 COMMON_RULES = """
 सख़्त नियम:
-- भाषा: सरल बोलचाल की हिंदी (देवनागरी)।
+- भाषा: सरल बोलचाल की हिंदी (देवनागरी)। विषय और भाषा पूरे परिवार और बच्चों के देखने लायक हो: कोई अश्लील, हिंसक या भड़काऊ बात नहीं।
 - अपनी तरफ़ से कोई नई बात, आँकड़ा, तारीख़ या बयान मत गढ़ो। अफ़वाह, विवाद, किसी की निजी ज़िंदगी या बदनामी वाली बात नहीं। जो पक्का न हो उसे "रिपोर्ट्स के मुताबिक" कहो या छोड़ दो।
 - "hook": स्क्रीन पर बड़ा लिखा जाने वाला 3-6 शब्दों का चौंकाने वाला वाक्य (जैसे "ये क्या हो गया?!").
 - पहले सीन का text ज़बरदस्त हुक हो (6-10 शब्द): चौंकाने वाली बात या सवाल, ताकि पहले 2 सेकंड में दर्शक रुक जाए।
@@ -161,7 +161,7 @@ LONG_SHAPE = (
 
 LONG_RULES = """
 सख़्त नियम:
-- भाषा: सरल बोलचाल की हिंदी (देवनागरी)।
+- भाषा: सरल बोलचाल की हिंदी (देवनागरी)। विषय और भाषा पूरे परिवार और बच्चों के देखने लायक हो: कोई अश्लील, हिंसक या भड़काऊ बात नहीं।
 - सिर्फ़ पक्के, सर्वमान्य और जाँचे हुए तथ्य। अपनी तरफ़ से कोई नई बात, आँकड़ा, तारीख़ या बयान मत गढ़ो। अफ़वाह, विवाद, किसी की निजी ज़िंदगी या बदनामी वाली बात नहीं। जो पक्का न हो उसे "रिपोर्ट्स के मुताबिक" कहो या छोड़ दो।
 - कुल {n} सीन। हर सीन का text 16 से 24 शब्द का (दो छोटे वाक्य), बोलने में सहज।
 - संरचना: (1) पहले 3 सीन: ज़बरदस्त हुक, यानी वीडियो में क्या मिलेगा और सबसे चौंकाने वाली बात का इशारा। (2) फिर 6 से 8 हिस्से; हर हिस्से में एक पक्का तथ्य या कहानी 4-6 सीन में: पहले सवाल, फिर तथ्य, फिर "हैरानी वाली बात"। (3) बीच में एक बार "आगे सबसे अनोखी बात आने वाली है, रुके रहना"। (4) आख़िर में सार, दर्शकों से कमेंट में एक सवाल और सब्सक्राइब की छोटी अपील।
@@ -659,6 +659,21 @@ def qwords(q):
     return [w for w in re.findall(r"[a-z0-9]+", (q or "").lower()) if len(w) > 2 and w not in STOP]
 
 
+UNSAFE_WORDS = set("""nude nudes nudity naked topless nsfw porn porno pornography sex sexy sexual erotic
+erotica strip stripper striptease fetish lingerie underwear bikini breast breasts boob boobs genital genitals
+adult xxx explicit gore gory corpse corpses murder rape suicide torture drug drugs cocaine heroin bloody
+massacre beheading mutilated""".split())
+UNSAFE_HI = ("नग्न", "अश्लील", "न्यूड", "सेक्स", "हत्या", "ख़ून", "खून")
+
+
+def unsafe_text(text):
+    """शीर्षक/टैग/विवरण में अश्लील या हिंसक शब्द हों तो True (ऐसी फ़ोटो/क्लिप कभी नहीं ली जाती)।"""
+    low = (text or "").lower()
+    if set(re.findall(r"[a-z]+", low)) & UNSAFE_WORDS:
+        return True
+    return any(w in low for w in UNSAFE_HI)
+
+
 def match_score(words, text):
     t = (text or "").lower()
     return sum(1 for w in words if w in t)
@@ -712,6 +727,8 @@ def pexels_videos(query):
                 continue
             best = max(pool, key=lambda f: min(f["width"], 1920 if LONG else 1080))
             slug = (v.get("url", "").rstrip("/").split("/")[-1]).replace("-", " ")
+            if unsafe_text(slug):
+                continue
             out.append({"id": f"pexels{v.get('id')}", "url": best["link"],
                         "dur": float(v.get("duration") or 0), "text": slug})
     except Exception as e:
@@ -738,7 +755,7 @@ def pixabay_videos(query):
                 if v.get("url") and (v.get("size") or 0) < 45_000_000:
                     url = v["url"]
                     break
-            if url:
+            if url and not unsafe_text(h.get("tags", "")):
                 out.append({"id": f"pixabay{h.get('id')}", "url": url,
                             "dur": float(h.get("duration") or 0), "text": h.get("tags", "")})
     except Exception as e:
@@ -825,6 +842,8 @@ def commons_photo(query, ratio=0.6):
             continue
         desc = re.sub(r"<[^>]+>", " ", (meta.get("ImageDescription") or {}).get("value", ""))
         title = page.get("title", "").replace("File:", "")
+        if unsafe_text(f"{title} {desc}"):
+            continue
         sc = match_score(words, f"{title} {desc}")
         if sc < need:
             continue
@@ -855,14 +874,14 @@ def _save_clip(data, ext):
     return p
 
 
-def nasa_clip(query):
+def nasa_clip(query, ratio=0.75):
     """NASA की वीडियो (आम तौर पर बिना कॉपीराइट), बिना key। लौटाता है (path, credit) या None।"""
     if "nasa" in DISABLED:
         return None
     words = qwords(query)
     if not words:
         return None
-    need = max(1, math.ceil(len(words) * 0.5))
+    need = max(1, math.ceil(len(words) * ratio))
     try:
         r = requests.get("https://images-api.nasa.gov/search",
                          params={"q": query, "media_type": "video"}, headers=UA, timeout=30)
@@ -881,6 +900,8 @@ def nasa_clip(query):
         nid = d.get("nasa_id", "")
         text = (f"{d.get('title', '')} {(d.get('description') or '')[:300]} "
                 f"{' '.join(d.get('keywords') or [])}")
+        if unsafe_text(text):
+            continue
         sc = match_score(words, text)
         if sc >= need and it.get("href") and nid and nid not in USED:
             cands.append((sc, it, d))
@@ -906,14 +927,14 @@ def nasa_clip(query):
     return None
 
 
-def commons_clip(query):
+def commons_clip(query, ratio=0.75):
     """Wikimedia Commons की खुले लाइसेंस वाली वीडियो। लौटाता है (path, credit) या None।"""
     if "commons" in DISABLED:
         return None
     words = qwords(query)
     if not words:
         return None
-    need = max(1, math.ceil(len(words) * 0.5))
+    need = max(1, math.ceil(len(words) * ratio))
     params = {
         "action": "query", "format": "json", "generator": "search",
         "gsrsearch": f"{query} filetype:video", "gsrnamespace": 6, "gsrlimit": 15,
@@ -944,6 +965,8 @@ def commons_clip(query):
             continue
         desc = re.sub(r"<[^>]+>", " ", (meta.get("ImageDescription") or {}).get("value", ""))
         title = page.get("title", "").replace("File:", "")
+        if unsafe_text(f"{title} {desc}"):
+            continue
         sc = match_score(words, f"{title} {desc}")
         url = info.get("url")
         if sc >= need and url and url not in USED:
@@ -968,14 +991,14 @@ def _archive_license_ok(u):
     return "/publicdomain/" in low or "/licenses/by/" in low or "/licenses/by-sa/" in low
 
 
-def archive_clip(query):
+def archive_clip(query, ratio=0.75):
     """Internet Archive की खुले लाइसेंस (CC BY / BY-SA / पब्लिक डोमेन) वाली वीडियो।"""
     if "archive" in DISABLED:
         return None
     words = qwords(query)
     if not words:
         return None
-    need = max(1, math.ceil(len(words) * 0.5))
+    need = max(1, math.ceil(len(words) * ratio))
     try:
         r = requests.get("https://archive.org/advancedsearch.php", params={
             "q": f"({query}) AND mediatype:movies", "rows": 25, "output": "json",
@@ -1004,6 +1027,8 @@ def archive_clip(query):
         title = d.get("title") or ""
         if isinstance(title, list):
             title = " ".join(map(str, title))
+        if unsafe_text(f"{title} {desc}"):
+            continue
         sc = match_score(words, f"{title} {desc}")
         ident = d.get("identifier")
         if sc >= need and ident and ident not in USED:
@@ -1034,21 +1059,23 @@ def archive_clip(query):
     return None
 
 
-def open_clip(queries):
-    """खुले लाइसेंस की छोटी क्लिप। लौटाता है (path, query, credit) या None।"""
+def open_clip(queries, ratio=0.75):
+    """खुले लाइसेंस की छोटी क्लिप। लौटाता है (path, query, credit) या None।
+    सुरक्षा के लिए डिफ़ॉल्ट में सिर्फ़ NASA की क्लिप चलती हैं; commons/archive config में चालू करने पर,
+    और तब भी हर क्लिप की Gemini-समीक्षा के बाद ही वीडियो में रहती है।"""
     if not CFG.get("use_open_clips", True):
         return None
-    limit = int(CFG.get("max_open_clips", 14 if LONG else 4))
+    limit = int(CFG.get("max_open_clips", 6 if LONG else 2))
     if OPEN_COUNT[0] >= limit:
         return None
-    order = CFG.get("clip_sources") or ["commons", "archive", "nasa"]
+    order = CFG.get("clip_sources") or ["nasa"]
     fns = {"nasa": nasa_clip, "commons": commons_clip, "archive": archive_clip}
     for q in queries[:2]:
         for name in order:
             fn = fns.get(name)
             if not fn:
                 continue
-            got = fn(q)
+            got = fn(q, ratio)
             if got:
                 OPEN_COUNT[0] += 1
                 print(f"  खुले लाइसेंस की क्लिप ({name}) | {q}")
@@ -1069,7 +1096,8 @@ def pexels_photo(query):
             timeout=30,
         )
         photos = [p for p in r.json().get("photos", [])
-                  if match_score(words, p.get("alt", "")) >= 1 and p["id"] not in USED]
+                  if match_score(words, p.get("alt", "")) >= 1 and p["id"] not in USED
+                  and not unsafe_text(p.get("alt", ""))]
         random.shuffle(photos)
         for p in photos[:3]:
             data = _download(p["src"][ORIENT], min_bytes=20_000)
@@ -1113,6 +1141,8 @@ def openverse_photo(query, ratio=0.5):
         if w and h and min(w, h) < 600:
             continue
         tags = " ".join(t.get("name", "") for t in (it.get("tags") or []))
+        if unsafe_text(f"{it.get('title', '')} {tags}"):
+            continue
         sc = match_score(words, f"{it.get('title', '')} {tags}")
         url = it.get("url")
         if sc < need or not url or url in USED:
@@ -1308,11 +1338,11 @@ def get_visual(scene, idx, fallbacks=()):
         got = local_clip(qs)
         if got:
             print(f"  अपनी क्लिप (clips/) | {got[0].name}")
-            return "video", got[0], 1, got[1], {"query": qs[0] if qs else ""}
+            return "video", got[0], 1, got[1], {"query": qs[0] if qs else "", "local": True}
         return None
 
-    def try_open(qs):
-        got = open_clip(qs)
+    def try_open(qs, ratio=0.75):
+        got = open_clip(qs, ratio)
         if got:
             return "video", got[0], 1, got[2], {"query": got[1], "open": True}
         return None
@@ -1320,7 +1350,7 @@ def get_visual(scene, idx, fallbacks=()):
     safe = [q for q in queries if person_free(q)]
     if kind == "photo":
         r = (try_local(queries) or try_photos(queries, named, False) or try_video(queries)
-             or try_open(queries) or try_photos(safe, extra, True))
+             or try_open(queries, 1.0) or try_photos(safe, extra, True))
     else:
         r = (try_local(queries) or try_video(queries) or try_open(queries)
              or try_photos(safe, generic, True) or try_photos(safe, extra, True))
@@ -1359,40 +1389,69 @@ def _model_list():
     return models
 
 
+def extract_frames(path, k=2):
+    """क्लिप के 2 फ़्रेम (30% और 70% पर), समीक्षा के लिए।"""
+    try:
+        d = duration(path)
+    except Exception:
+        d = 0
+    pts = [0.3, 0.7][:k] if d > 1 else [0.0]
+    out = []
+    for n, pt in enumerate(pts):
+        f = WORK / f"fr_{pathlib.Path(path).stem}_{n}.jpg"
+        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-ss", f"{d * pt:.2f}", "-i", str(path),
+                        "-frames:v", "1", "-vf", "scale=360:-2", str(f)], capture_output=True)
+        if f.exists() and f.stat().st_size > 1000:
+            out.append(f)
+    return out
+
+
 def review_visuals(script, items):
-    """एक ही Gemini कॉल में सारी फ़ोटो की समीक्षा: कौन-सी सीन से सचमुच मेल खाती है।
-    items = [{"n", "path", "text", "query", "title"}]. लौटाता है {n: (ok, कारण)} या None।"""
+    """फ़ोटो और वीडियो-क्लिप (उनके फ़्रेम) की Gemini से समीक्षा: बच्चों के देखने लायक और सीन से मेल।
+    items = [{"n", "paths", "kind", "text", "query", "title"}]. लौटाता है {n: (ok, कारण)} या None।"""
     key = get_key("GEMINI_API_KEY")
     if not key or not items:
         return None
     prompt = (
-        "You are a strict photo editor for a Hindi YouTube Short.\n"
+        "You are a strict photo and video editor for a Hindi YouTube channel watched by families "
+        "and children.\n"
         f"Video title: {script.get('title', '')}\n"
-        "Each numbered image below is the background of one scene. For every image decide "
-        "ok=true ONLY if it clearly fits what that scene says. Use the image's source title "
-        "(given with it) to know who or what is shown; never try to identify anyone from their face.\n"
-        "Set ok=false when: it shows a person whose source title names someone other than the "
-        "person the scene is about, or the person is unnamed; it is a random event, red-carpet "
-        "or crowd photo of unnamed people; it is a drawing, painting, caricature or old print; "
-        "it is a screenshot, collage, poster with lots of text, logo or watermarked; it is low "
-        "quality; or it is unrelated to the scene. Photos of objects or places (film reel, cinema "
-        "hall, trophy) are ok if they fit the scene's mood. When unsure, set ok=false.\n"
+        "Each numbered item is the background of one scene: a photo, or a video clip shown as 1-2 frames. "
+        "For every item decide ok=true ONLY if BOTH are true: (1) it is completely safe for children and a "
+        "general audience, and (2) it clearly fits what that scene says. Use the source title given with "
+        "it to know who or what is shown; never try to identify anyone from their face.\n"
+        "Set ok=false when: it contains nudity, sexual or suggestive content, violence, gore, dead bodies, "
+        "drugs, or anything disturbing; it shows a person whose source title names someone other than the "
+        "person the scene is about, or the person is unnamed; it is a random crowd, stadium, parade, "
+        "ceremony or street scene that has nothing to do with the scene; a talking-head presenter "
+        "unrelated to the topic; a drawing, painting, caricature or old print; a screenshot, collage, "
+        "poster with lots of text, logo or watermark; low quality; or unrelated to the scene. Objects "
+        "or places (film reel, cinema hall, trophy, a landmark) are ok if they fit the scene. "
+        "When unsure, set ok=false.\n"
         'Reply ONLY JSON: {"results":[{"n":1,"ok":true,"reason":"max 8 words"}]}'
     )
     parts = [{"text": prompt}]
     for it in items:
-        try:
-            with Image.open(it["path"]) as im:
-                im = im.convert("RGB")
-                im.thumbnail((360, 640))
-                buf = io.BytesIO()
-                im.save(buf, "JPEG", quality=70)
-        except Exception:
+        shown = 0
+        for p in it["paths"]:
+            try:
+                with Image.open(p) as im:
+                    im = im.convert("RGB")
+                    im.thumbnail((360, 640))
+                    buf = io.BytesIO()
+                    im.save(buf, "JPEG", quality=70)
+            except Exception:
+                continue
+            if shown == 0:
+                kind = "video clip (frames)" if it.get("kind") == "video" else "photo"
+                parts.append({"text": f"Item {it['n']} - {kind}. Scene says: {it['text'][:140]} | "
+                                      f"search: {it['query']} | source title: "
+                                      f"{it['title'][:140] or '(unknown)'}"})
+            parts.append({"inline_data": {"mime_type": "image/jpeg",
+                                          "data": base64.b64encode(buf.getvalue()).decode()}})
+            shown += 1
+        if shown == 0:
             return None
-        parts.append({"text": f"Image {it['n']}. Scene says: {it['text'][:140]} | "
-                              f"search: {it['query']} | source title: {it['title'][:140] or '(unknown)'}"})
-        parts.append({"inline_data": {"mime_type": "image/jpeg",
-                                      "data": base64.b64encode(buf.getvalue()).decode()}})
     body = {"contents": [{"parts": parts}],
             "generationConfig": {"temperature": 0.1, "responseMimeType": "application/json"}}
     for model in _model_list()[:4]:
@@ -1401,7 +1460,7 @@ def review_visuals(script, items):
             try:
                 r = requests.post(url, headers={"x-goog-api-key": key,
                                                 "Content-Type": "application/json"},
-                                  json=body, timeout=120)
+                                  json=body, timeout=180)
             except Exception as e:
                 print("review issue:", str(e)[:80])
                 time.sleep(3)
@@ -1573,27 +1632,46 @@ def build_video(script):
                      "kind": kind, "src": src, "ok": ok, "credit": credit, "meta": meta})
         print(f"सीन {i + 1}/{len(scenes)} चुना ({d:.1f}s, {kind}, अंक {ok:g})")
 
-    # चरण 2: सारी फ़ोटो की एक साथ समीक्षा; बेमेल फ़ोटो की जगह टेक्स्ट-कार्ड
-    check = [p for p in prep if p["kind"] == "image" and not p["meta"].get("card")]
-    if check:
-        items = [{"n": p["i"] + 1, "path": p["src"], "text": p["sc"]["text"],
-                  "query": p["meta"].get("query", ""), "title": p["meta"].get("title", "")}
-                 for p in check]
-        verdict = review_visuals(script, items)
-        if verdict is None:
-            print("⚠️ फ़ोटो की समीक्षा नहीं हो सकी: आम (बिना नाम की) फ़ोटो हटाकर कार्ड लगा रहे हैं")
-        for p in check:
-            if verdict is None:
-                bad, why = bool(p["meta"].get("generic")), "समीक्षा नहीं हुई"
-            else:
-                okv, why = verdict.get(p["i"] + 1, (False, "जवाब में नहीं"))
-                bad = not okv
-            if bad:
-                print(f"  ✂️ सीन {p['i'] + 1} की फ़ोटो हटाई ({why}) -> टेक्स्ट-कार्ड")
-                kind, src, ok, credit, meta = make_card(p["sc"], p["i"])
-                p.update(kind=kind, src=src, ok=ok, credit=credit, meta=meta)
-            else:
-                print(f"  ✅ सीन {p['i'] + 1} की फ़ोटो ठीक ({why})")
+    # चरण 2: सारी फ़ोटो और क्लिप की समीक्षा (बच्चों के लायक + सीन से मेल); बेमेल की जगह टेक्स्ट-कार्ड
+    check, items = [], []
+    for p in prep:
+        if p["meta"].get("card") or p["meta"].get("local"):
+            continue
+        if p["kind"] == "image":
+            paths = [p["src"]]
+        else:
+            paths = extract_frames(p["src"])
+        check.append(p)
+        items.append({"n": p["i"] + 1, "paths": paths, "kind": p["kind"],
+                      "text": p["sc"]["text"], "query": p["meta"].get("query", ""),
+                      "title": p["meta"].get("title", "") or p.get("credit") or ""})
+    verdict, no_review = {}, set()
+    for start in range(0, len(items), 12):
+        chunk = items[start:start + 12]
+        v = review_visuals(script, chunk)
+        if v is None:
+            no_review.update(it["n"] for it in chunk)
+        else:
+            verdict.update(v)
+    if no_review:
+        print("⚠️ कुछ की समीक्षा नहीं हो सकी: खुली क्लिप और बिना नाम की आम फ़ोटो हटाकर कार्ड लगा रहे हैं")
+    removed = 0
+    for p in check:
+        n = p["i"] + 1
+        if n in no_review:
+            bad = bool(p["meta"].get("generic") or p["meta"].get("open"))
+            why = "समीक्षा नहीं हुई"
+        else:
+            okv, why = verdict.get(n, (False, "जवाब में नहीं"))
+            bad = not okv
+        if bad:
+            removed += 1
+            print(f"  ✂️ सीन {n} की {'क्लिप' if p['kind'] == 'video' else 'फ़ोटो'} हटाई ({why}) -> टेक्स्ट-कार्ड")
+            kind, src, ok, credit, meta = make_card(p["sc"], p["i"])
+            p.update(kind=kind, src=src, ok=ok, credit=credit, meta=meta)
+        else:
+            print(f"  ✅ सीन {n} ठीक ({why})")
+    print(f"समीक्षा: {len(check) - removed}/{len(check)} ठीक, {removed} हटाईं")
 
     # चरण 3: हर सीन का वीडियो बनाना और जोड़ना
     clips, credits, ok_count = [], [], 0
@@ -1779,7 +1857,7 @@ def main():
     tags = clean_tags(script.get("tags"))
 
     ratio = stats["visual"] / max(1, stats["total"])
-    min_ratio = float(CFG.get("min_visual_ratio", 0.7))
+    min_ratio = float(CFG.get("min_visual_ratio", 0.8 if LONG else 0.7))
     print(f"सही फ़ुटेज वाले सीन: {stats['visual']:g}/{stats['total']} ({ratio:.0%})")
     privacy = None
     if ratio < min_ratio:
