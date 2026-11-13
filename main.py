@@ -196,6 +196,26 @@ def tts(text, voice, path):
     raise RuntimeError("आवाज़ नहीं बनी")
 
 
+def check_voice(voice, want="Male"):
+    """आवाज़ का नाम और लिंग (Male/Female) जाँचता है; गलत हो तो सही लिंग वाली हिंदी आवाज़ चुनता है"""
+    try:
+        voices = asyncio.run(edge_tts.list_voices())
+    except Exception as e:
+        log(f"  [warn] आवाज़ों की लिस्ट नहीं मिली ({str(e)[:80]}), {voice} ही चलाते हैं")
+        return voice
+    hi = [v for v in voices if v.get("Locale", "").startswith("hi-IN")]
+    for v in hi:
+        if v["ShortName"] == voice:
+            log(f"🎙 आवाज़: {voice} ({v['Gender']})")
+            if v["Gender"] == want:
+                return voice
+    for v in hi:
+        if v["Gender"] == want:
+            log(f"🎙 {want} आवाज़ बदलकर: {v['ShortName']}")
+            return v["ShortName"]
+    return voice
+
+
 def duration(p):
     return float(sh(["ffprobe", "-v", "error", "-show_entries", "format=duration",
                      "-of", "default=nw=1:nk=1", str(p)]).strip())
@@ -420,11 +440,12 @@ def main():
     s = make_script(ch, kind, models, recent)
     log(f"  टॉपिक: {s['title']} | सीन: {len(s['scenes'])}")
 
+    voice = check_voice(ch.get("voice", "hi-IN-MadhurNeural"), ch.get("gender", "Male"))
     used_urls, credits, scene_files, first_img = set(), [], [], None
     for i, sc in enumerate(s["scenes"]):
         log(f"[सीन {i + 1}/{len(s['scenes'])}] {sc['narration'][:50]}...")
         audio = WORK / f"a_{i:02d}.mp3"
-        tts(sc["narration"], ch.get("voice", "hi-IN-MadhurNeural"), audio)
+        tts(sc["narration"], voice, audio)
         dur = duration(audio) + 0.3
 
         media = IF.pick_media(sc.get("image_queries", []), sc.get("visual_en", ""),
