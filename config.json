@@ -19,7 +19,7 @@
       "privacy": "public",
       "client_id_secret": "YT_CLIENT_ID",
       "client_secret_secret": "YT_CLIENT_SECRET",
-      "token_secret": "YT_REFRESH_FACT"
+      "token_secret": "YT_REFRESH_TOKEN_FACT"
     },
     "movies": {
       "name": "Movies Channel",
@@ -39,7 +39,7 @@
       "privacy": "public",
       "client_id_secret": "YT_CLIENT_ID",
       "client_secret_secret": "YT_CLIENT_SECRET",
-      "token_secret": "YT_REFRESH_MOVIES"
+      "token_secret": "YT_REFRESH_TOKEN"
     }
   }
 }
