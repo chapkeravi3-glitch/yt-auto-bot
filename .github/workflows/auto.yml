@@ -81,8 +81,8 @@ jobs:
           PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
           YT_CLIENT_ID: ${{ secrets.YT_CLIENT_ID }}
           YT_CLIENT_SECRET: ${{ secrets.YT_CLIENT_SECRET }}
-          YT_REFRESH_FACT: ${{ secrets.YT_REFRESH_FACT }}
-          YT_REFRESH_MOVIES: ${{ secrets.YT_REFRESH_MOVIES }}
+          YT_REFRESH_TOKEN_FACT: ${{ secrets.YT_REFRESH_TOKEN_FACT }}
+          YT_REFRESH_TOKEN: ${{ secrets.YT_REFRESH_TOKEN }}
         run: python main.py --channel "${{ steps.plan.outputs.ch }}" --type "${{ steps.plan.outputs.ty }}"
 
       - name: इतिहास सेव करो (दोहराव रोकने के लिए)
