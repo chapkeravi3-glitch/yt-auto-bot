@@ -15,6 +15,7 @@
         "Bharat ke mandir, kile aur virasat"
       ],
       "voice": "hi-IN-MadhurNeural",
+      "gender": "Male",
       "category": "27",
       "privacy": "public",
       "client_id_secret": "YT_CLIENT_ID",
@@ -34,7 +35,8 @@
         "Filmon mein istemal hui technology aur special effects",
         "Awards aur Oscar ke itihaas ki baatein"
       ],
-      "voice": "hi-IN-SwaraNeural",
+      "voice": "hi-IN-MadhurNeural",
+      "gender": "Male",
       "category": "24",
       "privacy": "public",
       "client_id_secret": "YT_CLIENT_ID",
