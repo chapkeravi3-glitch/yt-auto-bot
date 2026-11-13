@@ -409,6 +409,13 @@ def main():
     used_topics = json.loads(USED.read_text(encoding="utf-8")) if USED.exists() else {}
     recent = used_topics.get(args.channel, [])
 
+    if not args.no_upload:
+        for k in ("client_id_secret", "client_secret_secret", "token_secret"):
+            if not os.environ.get(ch[k], "").strip():
+                raise RuntimeError(
+                    f"GitHub Secret '{ch[k]}' नहीं मिला या खाली है। "
+                    f"Settings → Secrets में यह नाम बनाओ (या config.json में सही नाम लिखो)")
+
     log(f"▶ चैनल: {ch['name']} | प्रकार: {kind}")
     s = make_script(ch, kind, models, recent)
     log(f"  टॉपिक: {s['title']} | सीन: {len(s['scenes'])}")
