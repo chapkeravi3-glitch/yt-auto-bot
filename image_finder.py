@@ -31,10 +31,17 @@ def _get_json(url, source, params=None, headers=None):
             print(f"  [warn] {source}: लिमिट पूरी, इस रन में बंद")
             DISABLED.add(source)
             return None
+        if r.status_code in (400, 401, 403):
+            # key गलत/बंद है। URL में key होती है, इसलिए URL लॉग में नहीं छापते
+            print(f"  [warn] {source}: key या रिक्वेस्ट गलत ({r.status_code}) "
+                  f"{r.text[:80]!r}, इस रन में बंद")
+            DISABLED.add(source)
+            return None
         r.raise_for_status()
         return r.json()
     except Exception as e:
-        print(f"  [warn] {source}: {str(e)[:120]}")
+        msg = re.sub(r"key=[^&\s]+", "key=***", str(e))
+        print(f"  [warn] {source}: {msg[:120]}")
         return None
 
 
