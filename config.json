@@ -1,94 +1,45 @@
-name: auto-video
-
-on:
-  schedule:
-    - cron: "30 3 * * *"    # 09:00 IST  - Fact शॉर्ट
-    - cron: "30 7 * * *"    # 13:00 IST  - Movies शॉर्ट
-    - cron: "30 11 * * *"   # 17:00 IST  - लॉन्ग (एक दिन Fact, एक दिन Movies)
-    - cron: "30 13 * * *"   # 19:00 IST  - Fact शॉर्ट
-    - cron: "30 15 * * *"   # 21:00 IST  - Movies शॉर्ट
-  workflow_dispatch:
-    inputs:
-      channel:
-        description: "fact या movies"
-        default: "fact"
-      type:
-        description: "short या long"
-        default: "short"
-
-permissions:
-  contents: write
-
-concurrency:
-  group: auto-video
-  cancel-in-progress: false
-
-jobs:
-  make:
-    runs-on: ubuntu-latest
-    timeout-minutes: 120
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: सिस्टम पैकेज (ffmpeg, हिंदी फ़ॉन्ट)
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg fonts-noto-core libraqm0 libfribidi0
-
-      - name: CLIP मॉडल कैश
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/huggingface
-          key: clip-vit-b32-v1
-
-      - name: पाइथन पैकेज
-        run: |
-          pip install torch --index-url https://download.pytorch.org/whl/cpu
-          pip install -r requirements.txt
-
-      - name: तय करो क्या बनाना है
-        id: plan
-        env:
-          EVENT: ${{ github.event_name }}
-          SCHEDULE: ${{ github.event.schedule }}
-          IN_CH: ${{ github.event.inputs.channel }}
-          IN_TY: ${{ github.event.inputs.type }}
-        run: |
-          if [ "$EVENT" = "workflow_dispatch" ]; then
-            CH="$IN_CH"; TY="$IN_TY"
-          else
-            case "$SCHEDULE" in
-              "30 3 * * *")  CH=fact;   TY=short ;;
-              "30 7 * * *")  CH=movies; TY=short ;;
-              "30 11 * * *") TY=long
-                 if [ $((10#$(date -u +%d) % 2)) -eq 1 ]; then CH=fact; else CH=movies; fi ;;
-              "30 13 * * *") CH=fact;   TY=short ;;
-              "30 15 * * *") CH=movies; TY=short ;;
-              *) echo "अनजाना शेड्यूल"; exit 1 ;;
-            esac
-          fi
-          echo "ch=$CH" >> "$GITHUB_OUTPUT"
-          echo "ty=$TY" >> "$GITHUB_OUTPUT"
-
-      - name: वीडियो बनाओ और अपलोड करो
-        env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
-          PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
-          YT_CLIENT_ID: ${{ secrets.YT_CLIENT_ID }}
-          YT_CLIENT_SECRET: ${{ secrets.YT_CLIENT_SECRET }}
-          YT_REFRESH_FACT: ${{ secrets.YT_REFRESH_FACT }}
-          YT_REFRESH_MOVIES: ${{ secrets.YT_REFRESH_MOVIES }}
-        run: python main.py --channel "${{ steps.plan.outputs.ch }}" --type "${{ steps.plan.outputs.ty }}"
-
-      - name: इतिहास सेव करो (दोहराव रोकने के लिए)
-        if: success()
-        run: |
-          git config user.name "yt-auto-bot"
-          git config user.email "bot@users.noreply.github.com"
-          git add used_topics.json
-          git diff --cached --quiet || (git commit -m "used topics update" && git pull --rebase && git push)
+{
+  "gemini_models": ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-2.5-flash-lite"],
+  "channels": {
+    "fact": {
+      "name": "Fact India",
+      "niche": "Surprising, true facts about India, science, history, space, animals, human body and the world. Short, punchy and easy to understand.",
+      "themes": [
+        "India ke ajeeb aur sachche tathya",
+        "Vigyan aur technology ke hairan karne wale facts",
+        "Itihaas ki kam suni baatein",
+        "Antariksh aur grah-nakshatra",
+        "Janwar aur prakriti",
+        "Insani sharir aur dimag",
+        "Duniya ke ajeeb sthan aur desh",
+        "Bharat ke mandir, kile aur virasat"
+      ],
+      "voice": "hi-IN-MadhurNeural",
+      "category": "27",
+      "privacy": "public",
+      "client_id_secret": "YT_CLIENT_ID",
+      "client_secret_secret": "YT_CLIENT_SECRET",
+      "token_secret": "YT_REFRESH_FACT"
+    },
+    "movies": {
+      "name": "Movies Channel",
+      "niche": "Verified movie trivia, behind-the-scenes stories, film history, box-office records and little-known facts about Bollywood and Hollywood films and actors. No unverified gossip, no spoilers dumped without warning.",
+      "themes": [
+        "Bollywood filmon ke behind-the-scenes kisse",
+        "Hollywood filmon ke ajeeb tathya",
+        "Mashhoor filmon ke box-office record",
+        "Purani classic filmon ki kahaniyan",
+        "Filmon ki shooting locations",
+        "Mashhoor directors aur unki khaas baatein",
+        "Filmon mein istemal hui technology aur special effects",
+        "Awards aur Oscar ke itihaas ki baatein"
+      ],
+      "voice": "hi-IN-SwaraNeural",
+      "category": "24",
+      "privacy": "public",
+      "client_id_secret": "YT_CLIENT_ID",
+      "client_secret_secret": "YT_CLIENT_SECRET",
+      "token_secret": "YT_REFRESH_MOVIES"
+    }
+  }
+}
