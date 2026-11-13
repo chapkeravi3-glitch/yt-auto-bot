@@ -44,45 +44,92 @@ def sh(cmd):
 
 
 # ================================================================ Gemini
-def gemini_json(prompt, models, max_tokens):
-    key = os.environ["GEMINI_API_KEY"]
+def list_gemini_models(key):
+    """Gemini की तरफ़ से अभी चालू मॉडल की लिस्ट (नए/stable पहले)"""
+    try:
+        r = requests.get("https://generativelanguage.googleapis.com/v1beta/models",
+                         params={"key": key, "pageSize": 200}, timeout=60)
+    except Exception as e:
+        log(f"  मॉडल लिस्ट नहीं मिली: {str(e)[:100]}")
+        return []
+    if r.status_code != 200:
+        log(f"  ⚠ मॉडल लिस्ट माँगने पर {r.status_code}: {r.text[:200]}")
+        log("  → शायद GEMINI_API_KEY गलत है या बंद है")
+        return []
+    skip = ("image", "tts", "audio", "live", "embedding", "vision", "robotics",
+            "computer", "native", "thinking", "learnlm", "gemma", "aqa")
+    found = []
+    for m in r.json().get("models", []):
+        name = m.get("name", "").replace("models/", "")
+        if "generateContent" not in m.get("supportedGenerationMethods", []):
+            continue
+        if "flash" not in name or any(x in name for x in skip):
+            continue
+        ver = re.search(r"gemini-(\d+(?:\.\d+)?)", name)
+        ver = float(ver.group(1)) if ver else 0
+        unstable = any(x in name for x in ("preview", "exp", "-0"))
+        found.append((unstable, "lite" in name, -ver, name))
+    found.sort()
+    return [f[3] for f in found]
+
+
+def _gemini_try(key, model, prompt, max_tokens):
+    """एक मॉडल पर कोशिश। (नतीजा, कारण) लौटाता है; नतीजा None हो तो कारण देखो"""
     last = "कुछ नहीं"
+    for attempt in range(5):
+        try:
+            r = requests.post(
+                f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+                params={"key": key},
+                json={"contents": [{"parts": [{"text": prompt}]}],
+                      "generationConfig": {"temperature": 0.9,
+                                           "responseMimeType": "application/json",
+                                           "maxOutputTokens": max_tokens}},
+                timeout=240)
+        except Exception as e:
+            last = str(e)[:150]
+            time.sleep(10)
+            continue
+        if r.status_code in (429, 500, 502, 503, 504):
+            wait = min(15 * 2 ** attempt, 120)
+            last = f"{model} {r.status_code}"
+            log(f"  Gemini {model} → {r.status_code}, {wait} सेकंड रुककर दोबारा")
+            time.sleep(wait)
+            continue
+        if r.status_code == 404:
+            log(f"  मॉडल {model} नहीं मिला (बंद हो चुका होगा)")
+            return None, f"{model} 404"
+        if r.status_code != 200:
+            return None, f"{model} {r.status_code}: {r.text[:150]}"
+        try:
+            parts = r.json()["candidates"][0]["content"]["parts"]
+            txt = "".join(p.get("text", "") for p in parts).strip()
+            txt = re.sub(r"^```(?:json)?\s*|\s*```$", "", txt)
+            return json.loads(txt), ""
+        except Exception as e:
+            last = f"JSON पढ़ने में दिक्कत: {str(e)[:100]}"
+            time.sleep(5)
+    return None, last
+
+
+def gemini_json(prompt, models, max_tokens):
+    key = os.environ["GEMINI_API_KEY"].strip()
+    tried, last = set(), "कुछ नहीं"
     for model in models:
-        for attempt in range(5):
-            try:
-                r = requests.post(
-                    f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
-                    params={"key": key},
-                    json={"contents": [{"parts": [{"text": prompt}]}],
-                          "generationConfig": {"temperature": 0.9,
-                                               "responseMimeType": "application/json",
-                                               "maxOutputTokens": max_tokens}},
-                    timeout=240)
-            except Exception as e:
-                last = str(e)[:150]
-                time.sleep(10)
-                continue
-            if r.status_code in (429, 500, 502, 503, 504):
-                wait = min(15 * 2 ** attempt, 120)
-                last = f"{model} {r.status_code}"
-                log(f"  Gemini {model} → {r.status_code}, {wait} सेकंड रुककर दोबारा")
-                time.sleep(wait)
-                continue
-            if r.status_code == 404:
-                log(f"  मॉडल {model} नहीं मिला, अगला आज़माते हैं")
-                last = f"{model} 404"
-                break
-            if r.status_code != 200:
-                last = f"{model} {r.status_code}: {r.text[:150]}"
-                break
-            try:
-                parts = r.json()["candidates"][0]["content"]["parts"]
-                txt = "".join(p.get("text", "") for p in parts).strip()
-                txt = re.sub(r"^```(?:json)?\s*|\s*```$", "", txt)
-                return json.loads(txt)
-            except Exception as e:
-                last = f"JSON पढ़ने में दिक्कत: {str(e)[:100]}"
-                time.sleep(5)
+        tried.add(model)
+        data, why = _gemini_try(key, model, prompt, max_tokens)
+        if data is not None:
+            return data
+        last = why
+    log("  लिखे हुए मॉडल नहीं चले, Gemini से चालू मॉडल की लिस्ट माँग रहे हैं")
+    avail = [m for m in list_gemini_models(key) if m not in tried]
+    log(f"  चालू मॉडल: {avail[:6]}")
+    for model in avail[:4]:
+        data, why = _gemini_try(key, model, prompt, max_tokens)
+        if data is not None:
+            log(f"  ✔ {model} चल गया। config.json के gemini_models में इसे सबसे ऊपर लिख दो")
+            return data
+        last = why
     raise RuntimeError(f"Gemini से स्क्रिप्ट नहीं मिली ({last})")
 
 
