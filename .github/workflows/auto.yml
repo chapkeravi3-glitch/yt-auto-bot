@@ -82,9 +82,9 @@ jobs:
           PIXABAY_API_KEY: ${{ secrets.PIXABAY_API_KEY }}
           YT_CLIENT_ID: ${{ secrets.YT_CLIENT_ID }}
           YT_CLIENT_SECRET: ${{ secrets.YT_CLIENT_SECRET }}
-          FACT_REFRESH_TOKEN: ${{ secrets.FACT_REFRESH_TOKEN }}
-          MOVIES_REFRESH_TOKEN: ${{ secrets.MOVIES_REFRESH_TOKEN }}
-          CRICKET_REFRESH_TOKEN: ${{ secrets.CRICKET_REFRESH_TOKEN }}
+          YT_REFRESH_TOKEN: ${{ secrets.YT_REFRESH_TOKEN }}
+          YT_REFRESH_TOKEN_FACT: ${{ secrets.YT_REFRESH_TOKEN_FACT }}
+          YT_REFRESH_TOKEN_CRICKET: ${{ secrets.YT_REFRESH_TOKEN_CRICKET }}
           NOUPLOAD: ${{ (github.event_name == 'workflow_dispatch' && !inputs.upload) && '--no-upload' || '' }}
         run: python main.py --channel "${{ matrix.channel }}" --type "${{ needs.plan.outputs.type }}" $NOUPLOAD
 
