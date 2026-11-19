@@ -1,0 +1,60 @@
+name: Login Cricket
+
+on:
+  workflow_dispatch:
+
+jobs:
+  login:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Google लॉगिन (क्रिकेट चैनल)
+        env:
+          CID: ${{ secrets.YT_CLIENT_ID }}
+          CSEC: ${{ secrets.YT_CLIENT_SECRET }}
+        run: |
+          python3 - <<'EOF'
+          import os, time, json, urllib.request, urllib.parse, urllib.error
+
+          def post(url, data):
+              req = urllib.request.Request(url, data=urllib.parse.urlencode(data).encode())
+              try:
+                  with urllib.request.urlopen(req) as r:
+                      return json.load(r)
+              except urllib.error.HTTPError as e:
+                  return json.load(e)
+
+          cid, csec = os.environ["CID"], os.environ["CSEC"]
+          d = post("https://oauth2.googleapis.com/device/code",
+                   {"client_id": cid, "scope": "https://www.googleapis.com/auth/youtube.upload"})
+          if "device_code" not in d:
+              print("❌ गड़बड़:", d)
+              raise SystemExit(1)
+
+          print("=" * 50)
+          print("1) यह लिंक खोलो:", d["verification_url"])
+          print("2) यह कोड डालो:", d["user_code"])
+          print("3) क्रिकेट वाला चैनल/अकाउंट चुनकर Allow दबाओ")
+          print("=" * 50, flush=True)
+
+          end = time.time() + d["expires_in"]
+          wait = d.get("interval", 5)
+          while time.time() < end:
+              time.sleep(wait)
+              t = post("https://oauth2.googleapis.com/token",
+                       {"client_id": cid, "client_secret": csec,
+                        "device_code": d["device_code"],
+                        "grant_type": "urn:ietf:params:oauth:grant-type:device_code"})
+              if "refresh_token" in t:
+                  print("\n✅ लॉगिन हो गया। नीचे की लाइन में पूरा टोकन है:\n")
+                  print("REFRESH_TOKEN:", t["refresh_token"], flush=True)
+                  raise SystemExit(0)
+              err = t.get("error")
+              if err == "slow_down":
+                  wait += 5
+              elif err not in (None, "authorization_pending"):
+                  print("❌", t)
+                  raise SystemExit(1)
+          print("❌ समय खत्म, दोबारा चलाओ")
+          raise SystemExit(1)
+          EOF
