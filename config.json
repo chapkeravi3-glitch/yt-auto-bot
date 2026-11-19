@@ -1,47 +1,41 @@
 {
-  "gemini_models": ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-2.5-flash-lite"],
+  "gemini_models": ["gemini-2.5-flash", "gemini-2.5-flash-lite"],
   "channels": {
     "fact": {
       "name": "Fact India",
-      "niche": "Surprising, true facts about India, science, history, space, animals, human body and the world. Short, punchy and easy to understand.",
-      "themes": [
-        "India ke ajeeb aur sachche tathya",
-        "Vigyan aur technology ke hairan karne wale facts",
-        "Itihaas ki kam suni baatein",
-        "Antariksh aur grah-nakshatra",
-        "Janwar aur prakriti",
-        "Insani sharir aur dimag",
-        "Duniya ke ajeeb sthan aur desh",
-        "Bharat ke mandir, kile aur virasat"
-      ],
+      "niche": "Surprising true facts about India, science, history, space, human body and the world",
+      "themes": ["Indian history facts", "science facts", "space and planets", "human body", "animals and nature", "famous places of India", "inventions", "world records", "geography"],
       "voice": "hi-IN-MadhurNeural",
       "gender": "Male",
       "category": "27",
       "privacy": "public",
       "client_id_secret": "YT_CLIENT_ID",
       "client_secret_secret": "YT_CLIENT_SECRET",
-      "token_secret": "YT_REFRESH_TOKEN_FACT"
+      "token_secret": "FACT_REFRESH_TOKEN"
     },
     "movies": {
-      "name": "Movies Channel",
-      "niche": "Verified movie trivia, behind-the-scenes stories, film history, box-office records and little-known facts about Bollywood and Hollywood films and actors. No unverified gossip, no spoilers dumped without warning.",
-      "themes": [
-        "Bollywood filmon ke behind-the-scenes kisse",
-        "Hollywood filmon ke ajeeb tathya",
-        "Mashhoor filmon ke box-office record",
-        "Purani classic filmon ki kahaniyan",
-        "Filmon ki shooting locations",
-        "Mashhoor directors aur unki khaas baatein",
-        "Filmon mein istemal hui technology aur special effects",
-        "Awards aur Oscar ke itihaas ki baatein"
-      ],
+      "name": "Movies",
+      "niche": "Verified trivia, behind-the-scenes facts, box office records and history of Bollywood and Hollywood films",
+      "themes": ["Bollywood classic films trivia", "Hollywood blockbuster facts", "behind the scenes of famous movies", "box office records", "legendary actors and directors career facts", "movie making techniques", "iconic film songs history"],
       "voice": "hi-IN-MadhurNeural",
       "gender": "Male",
       "category": "24",
       "privacy": "public",
       "client_id_secret": "YT_CLIENT_ID",
       "client_secret_secret": "YT_CLIENT_SECRET",
-      "token_secret": "YT_REFRESH_TOKEN"
+      "token_secret": "MOVIES_REFRESH_TOKEN"
+    },
+    "cricket": {
+      "name": "Cricket",
+      "niche": "Cricket history, records, legendary players, World Cup and IPL moments, verified stats and stories",
+      "themes": ["cricket world cup history", "legendary batsmen records", "great bowlers and spells", "IPL memorable moments", "famous India vs Pakistan matches", "captains and their achievements", "unbelievable cricket records", "cricket rules and history", "famous stadiums"],
+      "voice": "hi-IN-MadhurNeural",
+      "gender": "Male",
+      "category": "17",
+      "privacy": "public",
+      "client_id_secret": "YT_CLIENT_ID",
+      "client_secret_secret": "YT_CLIENT_SECRET",
+      "token_secret": "CRICKET_REFRESH_TOKEN"
     }
   }
 }
