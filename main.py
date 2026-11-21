@@ -1,21 +1,35 @@
 #!/usr/bin/env python3
 """
-main.py - यूट्यूब ऑटो वीडियो बॉट (शॉर्ट्स + लॉन्ग)
+main.py - यूट्यूब ऑटो वीडियो बॉट (शॉर्ट्स + लॉन्ग)  [नया वर्ज़न]
+
+नया क्या है:
+  1. आज की ताज़ा खबरें (Google News RSS) लेकर उसी पर स्क्रिप्ट बनती है
+  2. ज़्यादातर सीन में असली वीडियो क्लिप (image_finder.py से), बाकी में HD फ़ोटो
+  3. आवाज़ स्मूथ: हर सीन की शुरू/आख़िर की चुप्पी कटती है और पूरी आवाज़ एक सतत ट्रैक बनती है
+  4. Gemini की "thinking" बंद, ताकि लॉन्ग स्क्रिप्ट बीच में कटे नहीं
 
 चलाने का तरीका:
     python main.py --channel fact --type short
     python main.py --channel movies --type long
-    python main.py --channel fact --type short --no-upload   # सिर्फ़ टेस्ट, अपलोड नहीं
+    python main.py --channel fact --type short --no-upload   # सिर्फ़ टेस्ट
+
+config.json में हर चैनल में ये वैकल्पिक चीज़ें जोड़ सकते हो:
+    "news_queries": ["cricket India", "IPL"],   # खबरें किन शब्दों से खोजनी हैं (न दो तो themes से)
+    "use_news": true,                           # false करो तो पुराने तरीके से themes से टॉपिक
+    "voice_rate": "+6%",                        # आवाज़ की रफ़्तार
+    "voice_pitch": "+0Hz"
 """
 import argparse
 import asyncio
 import json
+import math
 import os
 import re
 import shutil
 import subprocess
 import sys
 import time
+import xml.etree.ElementTree as ET
 from datetime import datetime
 from pathlib import Path
 
@@ -30,6 +44,8 @@ WORK = ROOT / "work"
 OUT = ROOT / "out"
 USED = ROOT / "used_topics.json"
 CONFIG = ROOT / "config.json"
+FPS = 30
+GAP = 0.10   # दो सीन के बीच की स्वाभाविक छोटी साँस (सेकंड)
 
 
 def log(*a):
@@ -41,6 +57,41 @@ def sh(cmd):
     if p.returncode != 0:
         raise RuntimeError(f"{cmd[0]} फेल: {p.stderr[-900:]}")
     return p.stdout
+
+
+# ================================================================ ताज़ा खबरें
+def fetch_news(ch, recent):
+    """Google News RSS से पिछले 1-2 दिन की ताज़ा खबरों की हेडलाइन लौटाता है"""
+    queries = ch.get("news_queries") or ch.get("themes", [])[:3]
+    heads, seen = [], set()
+    recent_text = " ".join(recent[-40:])
+    for q in queries[:5]:
+        for when in ("2d", "7d"):
+            try:
+                r = requests.get("https://news.google.com/rss/search",
+                                 params={"q": f"{q} when:{when}", "hl": "hi", "gl": "IN",
+                                         "ceid": "IN:hi"},
+                                 headers={"User-Agent": "Mozilla/5.0"}, timeout=30)
+                items = ET.fromstring(r.content).findall(".//item")
+            except Exception as e:
+                log(f"  खबर नहीं मिली ({q}): {str(e)[:80]}")
+                items = []
+            got = 0
+            for it in items[:10]:
+                t = (it.findtext("title") or "").strip()
+                if not t or t in seen:
+                    continue
+                seen.add(t)
+                # बहुत मिलती-जुलती (पहले बन चुकी) खबर छोड़ दो
+                words = [w for w in re.findall(r"\w+", t) if len(w) > 3][:6]
+                if words and sum(w in recent_text for w in words) >= 4:
+                    continue
+                heads.append(t)
+                got += 1
+            if got:
+                break
+    log(f"  ताज़ा खबरें मिलीं: {len(heads)}")
+    return heads[:18]
 
 
 # ================================================================ Gemini
@@ -76,16 +127,18 @@ def list_gemini_models(key):
 def _gemini_try(key, model, prompt, max_tokens):
     """एक मॉडल पर कोशिश। (नतीजा, कारण) लौटाता है; नतीजा None हो तो कारण देखो"""
     last = "कुछ नहीं"
+    use_thinking_cfg = bool(re.search(r"gemini-(2\.5|3)", model)) and "pro" not in model
     for attempt in range(5):
+        gen = {"temperature": 0.9, "responseMimeType": "application/json",
+               "maxOutputTokens": max_tokens}
+        if use_thinking_cfg:
+            gen["thinkingConfig"] = {"thinkingBudget": 0}   # सोचने में टोकन खर्च न हों, स्क्रिप्ट न कटे
         try:
             r = requests.post(
                 f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
                 params={"key": key},
-                json={"contents": [{"parts": [{"text": prompt}]}],
-                      "generationConfig": {"temperature": 0.9,
-                                           "responseMimeType": "application/json",
-                                           "maxOutputTokens": max_tokens}},
-                timeout=240)
+                json={"contents": [{"parts": [{"text": prompt}]}], "generationConfig": gen},
+                timeout=300)
         except Exception as e:
             last = str(e)[:150]
             time.sleep(10)
@@ -99,6 +152,9 @@ def _gemini_try(key, model, prompt, max_tokens):
         if r.status_code == 404:
             log(f"  मॉडल {model} नहीं मिला (बंद हो चुका होगा)")
             return None, f"{model} 404"
+        if r.status_code == 400 and use_thinking_cfg and "think" in r.text.lower():
+            use_thinking_cfg = False       # इस मॉडल में thinkingConfig नहीं चलता, बिना उसके
+            continue
         if r.status_code != 200:
             return None, f"{model} {r.status_code}: {r.text[:150]}"
         try:
@@ -133,32 +189,50 @@ def gemini_json(prompt, models, max_tokens):
     raise RuntimeError(f"Gemini से स्क्रिप्ट नहीं मिली ({last})")
 
 
-def make_script(ch, kind, models, recent):
+def make_script(ch, kind, models, recent, headlines):
     if kind == "short":
         length = ("A YouTube Short. 6 to 8 scenes. Total narration 95-115 words "
                   "(about 40-50 seconds when spoken).")
         max_tokens = 8192
     else:
-        length = ("A long YouTube video of about 8 minutes. 24 to 28 scenes, each narration "
-                  "40-55 words. Total 1100-1400 words. Clear intro, well-structured body, short outro.")
-        max_tokens = 24000
+        length = ("A long YouTube video of about 7-8 minutes. 20 to 24 scenes, each narration "
+                  "50-65 words. Total 1100-1400 words. Clear intro, well-structured body, short outro.")
+        max_tokens = 30000
+
+    today = datetime.utcnow().strftime("%d %B %Y")
+    if headlines:
+        topic_rule = (f"Today is {today}. Here are the LATEST news headlines (Hindi, newest first):\n"
+                      + "\n".join(f"- {h}" for h in headlines)
+                      + "\nPick ONE of these headlines that suits the channel best and make the video about "
+                        "that news. Use ONLY what the headline itself states plus well-established background "
+                        "facts. Never invent details, numbers, quotes or what-happened-next. "
+                        "If the news is uncertain, say so honestly.")
+    else:
+        topic_rule = (f"Pick ONE fresh, specific topic from these themes: {', '.join(ch['themes'])}.")
+
     prompt = f"""You are the scriptwriter of a Hindi YouTube channel called "{ch['name']}".
 Channel niche: {ch['niche']}
-Pick ONE fresh, specific topic from these themes: {', '.join(ch['themes'])}.
+{topic_rule}
 Do NOT repeat or closely resemble these recent topics: {json.dumps(recent[-40:], ensure_ascii=False)}.
 
 Write {length}
 Language of narration/title/description: simple spoken Hindi in Devanagari.
 
+NARRATION STYLE (very important, it will be read by a text-to-speech voice):
+- Write exactly how a friendly person TALKS, not like a book or a newspaper. Short everyday sentences (6-14 words).
+- Use commas and full stops where a speaker would breathe. No brackets, no emojis, no hashtags, no quotes inside narration.
+- The scenes are ONE continuous story. Do not greet or restart in every scene; each scene flows from the previous one.
+- No English abbreviations in narration; write them the way they are spoken in Hindi.
+
 Rules:
-- Use only true, well-known, verifiable facts. If unsure, leave it out. Never invent numbers, quotes or gossip.
+- Use only true, verifiable facts. If unsure, leave it out.
 - Scene 1 must be a strong hook (surprising question or fact).
 - The last scene: one short line asking viewers to subscribe.
 - For each scene give:
   "narration" (Hindi),
   "caption" (Hindi, max 6 words, shown on screen),
-  "image_queries" (2-3 English search phrases built from CONCRETE nouns: real places, animals, objects, famous people, events. No abstract words),
-  "visual_en" (one English sentence describing the ideal photo for this scene),
+  "image_queries" (2-3 English search phrases for STOCK footage/photos built from CONCRETE, filmable nouns: real places, crowds, stadium, city, animals, objects, famous landmarks. No abstract words, no person names unless world-famous),
+  "visual_en" (one English sentence describing the ideal shot for this scene),
   "prefer_video" (true if motion helps, else false).
 - "title": Hindi, under 70 characters, curiosity-driven but honest.
 - "description": 2-3 Hindi lines.
@@ -180,14 +254,14 @@ Return ONLY valid JSON in this shape:
 
 
 # ================================================================ आवाज़
-async def _tts(text, voice, path):
-    await edge_tts.Communicate(text, voice, rate="+0%").save(str(path))
+async def _tts(text, voice, path, rate, pitch):
+    await edge_tts.Communicate(text, voice, rate=rate, pitch=pitch).save(str(path))
 
 
-def tts(text, voice, path):
+def tts(text, voice, path, rate="+6%", pitch="+0Hz"):
     for a in range(4):
         try:
-            asyncio.run(_tts(text, voice, path))
+            asyncio.run(_tts(text, voice, path, rate, pitch))
             if Path(path).exists() and Path(path).stat().st_size > 1000:
                 return
         except Exception as e:
@@ -219,6 +293,25 @@ def check_voice(voice, want="Male"):
 def duration(p):
     return float(sh(["ffprobe", "-v", "error", "-show_entries", "format=duration",
                      "-of", "default=nw=1:nk=1", str(p)]).strip())
+
+
+def prepare_voice(mp3, wav):
+    """शुरू/आख़िर की चुप्पी काटता है, फिर पूरे फ़्रेम (1/30 सेकंड) पर नापकर छोटी साँस जोड़ता है।
+    इससे सीन बदलने पर आवाज़ रुकती नहीं, एक ही बहाव में चलती है। लौटाता है: सीन की सटीक लंबाई"""
+    tmp = Path(str(wav) + ".tmp.wav")
+    trim = ("silenceremove=start_periods=1:start_threshold=-50dB:start_silence=0.02,"
+            "areverse,"
+            "silenceremove=start_periods=1:start_threshold=-50dB:start_silence=0.02,"
+            "areverse")
+    sh(["ffmpeg", "-y", "-loglevel", "error", "-i", str(mp3), "-af", trim,
+        "-ar", "44100", "-ac", "1", str(tmp)])
+    d = duration(tmp)
+    target = math.ceil((d + GAP) * FPS) / FPS
+    sh(["ffmpeg", "-y", "-loglevel", "error", "-i", str(tmp),
+        "-af", f"apad=whole_dur={target:.4f}", "-t", f"{target:.4f}",
+        "-ar", "44100", "-ac", "1", str(wav)])
+    tmp.unlink(missing_ok=True)
+    return target
 
 
 # ================================================================ फ़ॉन्ट / कैप्शन / थंबनेल
@@ -308,41 +401,59 @@ def make_thumbnail(img_path, text, out):
     im.save(out, quality=88)
 
 
+def grab_frame(video, out):
+    """वीडियो क्लिप से एक फ़्रेम निकालता है (थंबनेल के लिए)"""
+    try:
+        sh(["ffmpeg", "-y", "-loglevel", "error", "-ss", "1", "-i", str(video),
+            "-frames:v", "1", "-q:v", "2", str(out)])
+        return str(out) if Path(out).exists() else None
+    except Exception:
+        return None
+
+
 # ================================================================ वीडियो बनाना (ffmpeg)
-def build_scene(i, media, audio, dur, W, H, cap_png):
+def build_scene(i, media, dur, W, H, cap_png):
+    """सीन का सिर्फ़ वीडियो (बिना आवाज़) बनाता है। आवाज़ बाद में एक सतत ट्रैक की तरह जुड़ती है"""
     out = WORK / f"scene_{i:02d}.mp4"
-    frames = int(dur * 30) + 2
+    frames = int(round(dur * FPS))
     cmd = ["ffmpeg", "-y", "-loglevel", "error"]
     if media["kind"] == "video":
         cmd += ["-stream_loop", "-1", "-i", media["path"]]
-        base = (f"[0:v]scale={W}:{H}:force_original_aspect_ratio=increase,"
-                f"crop={W}:{H},setsar=1,fps=30,format=yuv420p")
+        base = (f"[0:v]scale={W}:{H}:force_original_aspect_ratio=increase:flags=lanczos,"
+                f"crop={W}:{H},setsar=1,fps={FPS},format=yuv420p")
     else:
         big = WORK / f"big_{i:02d}.jpg"
-        cover(Image.open(media["path"]).convert("RGB"), int(W * 1.25), int(H * 1.25)).save(big, quality=92)
+        cover(Image.open(media["path"]).convert("RGB"), int(W * 1.5), int(H * 1.5)).save(big, quality=94)
         cmd += ["-i", str(big)]
-        z = ("min(1+0.0005*on,1.2)" if i % 2 == 0 else "max(1.2-0.0005*on,1)")
+        z = ("min(1+0.0004*on,1.25)" if i % 2 == 0 else "max(1.25-0.0004*on,1)")
         base = (f"[0:v]zoompan=z='{z}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
-                f":d={frames}:s={W}x{H}:fps=30,setsar=1,format=yuv420p")
-    cmd += ["-i", str(audio)]
+                f":d={frames}:s={W}x{H}:fps={FPS},setsar=1,format=yuv420p")
     if cap_png:
         cmd += ["-i", str(cap_png)]
-        fc = base + "[bg];[bg][2:v]overlay=0:0:format=auto,format=yuv420p[v]"
+        fc = base + "[bg];[bg][1:v]overlay=0:0:format=auto,format=yuv420p[v]"
     else:
         fc = base + "[v]"
-    cmd += ["-filter_complex", fc, "-map", "[v]", "-map", "1:a", "-af", "apad",
-            "-t", f"{dur:.2f}", "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
-            "-r", "30", "-c:a", "aac", "-ar", "44100", "-ac", "2", "-b:a", "128k",
-            "-movflags", "+faststart", str(out)]
+    cmd += ["-filter_complex", fc, "-map", "[v]", "-an",
+            "-frames:v", str(frames), "-c:v", "libx264", "-preset", "veryfast", "-crf", "21",
+            "-r", str(FPS), "-movflags", "+faststart", str(out)]
     sh(cmd)
     return out
 
 
-def concat(scene_files, out):
-    lst = WORK / "list.txt"
-    lst.write_text("".join(f"file '{p.resolve()}'\n" for p in scene_files))
+def concat(files, out, kind_args=("-c", "copy")):
+    lst = Path(str(out) + ".txt")
+    lst.write_text("".join(f"file '{Path(p).resolve()}'\n" for p in files))
     sh(["ffmpeg", "-y", "-loglevel", "error", "-f", "concat", "-safe", "0",
-        "-i", str(lst), "-c", "copy", str(out)])
+        "-i", str(lst), *kind_args, str(out)])
+
+
+def mux(video, voice_wav, out):
+    """वीडियो + पूरी आवाज़ जोड़ता है; आवाज़ को हल्का साफ़ और बराबर आवाज़-स्तर पर लाता है"""
+    af = "highpass=f=70,acompressor=threshold=-18dB:ratio=2.5:attack=5:release=80,loudnorm=I=-16:TP=-1.5:LRA=9"
+    sh(["ffmpeg", "-y", "-loglevel", "error", "-i", str(video), "-i", str(voice_wav),
+        "-map", "0:v", "-map", "1:a", "-c:v", "copy", "-af", af,
+        "-c:a", "aac", "-ar", "44100", "-b:a", "160k", "-shortest",
+        "-movflags", "+faststart", str(out)])
 
 
 # ================================================================ यूट्यूब अपलोड
@@ -368,7 +479,7 @@ def upload(ch, video, thumb, s, kind, credits):
     if kind == "short":
         desc += " #Shorts"
     if credits:
-        desc += "\n\nफ़ोटो/वीडियो क्रेडिट:\n" + "\n".join(credits)
+        desc += "\n\nफ़ोटो/वीडियो क्रेडिट:\n" + "\n".join(credits[:25])
     desc = desc[:4800]
     tags, total = [], 0
     for t in s.get("tags", []):
@@ -437,28 +548,44 @@ def main():
                     f"Settings → Secrets में यह नाम बनाओ (या config.json में सही नाम लिखो)")
 
     log(f"▶ चैनल: {ch['name']} | प्रकार: {kind}")
-    s = make_script(ch, kind, models, recent)
+    headlines = fetch_news(ch, recent) if ch.get("use_news", True) else []
+    s = make_script(ch, kind, models, recent, headlines)
     log(f"  टॉपिक: {s['title']} | सीन: {len(s['scenes'])}")
 
     voice = check_voice(ch.get("voice", "hi-IN-MadhurNeural"), ch.get("gender", "Male"))
-    used_urls, credits, scene_files, first_img = set(), [], [], None
+    rate, pitch = ch.get("voice_rate", "+6%"), ch.get("voice_pitch", "+0Hz")
+    used_ids, credits, scene_files, voice_files, first_img = set(), [], [], [], None
+    clip_count = 0
     for i, sc in enumerate(s["scenes"]):
         log(f"[सीन {i + 1}/{len(s['scenes'])}] {sc['narration'][:50]}...")
-        audio = WORK / f"a_{i:02d}.mp3"
-        tts(sc["narration"], voice, audio)
-        dur = duration(audio) + 0.3
+        mp3 = WORK / f"a_{i:02d}.mp3"
+        wav = WORK / f"a_{i:02d}.wav"
+        tts(sc["narration"], voice, mp3, rate, pitch)
+        dur = prepare_voice(mp3, wav)
+        voice_files.append(wav)
 
-        media = IF.pick_media(sc.get("image_queries", []), sc.get("visual_en", ""),
-                              orient, WORK, i, used_urls, bool(sc.get("prefer_video")))
+        # हर तीन में से दो सीन में वीडियो क्लिप की कोशिश
+        want_video = bool(sc.get("prefer_video")) or (i % 3 != 2)
+        try:
+            media = IF.pick_media(sc.get("image_queries", []), sc.get("visual_en", ""),
+                                  orient, WORK, i, used_ids, want_video)
+        except Exception as e:
+            log(f"  [warn] फ़ोटो/क्लिप खोजने में दिक्कत: {str(e)[:150]}")
+            media = None
         if not media:
-            log("  फ़ोटो नहीं मिली, सादा बैकग्राउंड लगा रहे हैं")
+            log("  कुछ नहीं मिला, सादा बैकग्राउंड लगा रहे हैं")
             g = WORK / f"grad_{i:02d}.jpg"
             gradient_image(g, W, H)
             media = {"path": str(g), "kind": "image", "credit": ""}
-        elif media["credit"] and media["credit"] not in credits:
-            credits.append(media["credit"])
-        if first_img is None and media["kind"] == "image":
+        else:
+            if media["kind"] == "video":
+                clip_count += 1
+            if media["credit"] and media["credit"] not in credits:
+                credits.append(media["credit"])
+        if first_img is None and media["kind"] == "image" and media["credit"]:
             first_img = media["path"]
+        elif first_img is None and media["kind"] == "video":
+            first_img = grab_frame(media["path"], WORK / f"frame_{i:02d}.jpg")
 
         cap_png = None
         if CAPTIONS_OK and sc.get("caption"):
@@ -469,14 +596,25 @@ def main():
                 log(f"  [warn] कैप्शन नहीं बना: {e}")
                 cap_png = None
         try:
-            scene_files.append(build_scene(i, media, audio, dur, W, H, cap_png))
+            scene_files.append(build_scene(i, media, dur, W, H, cap_png))
         except Exception as e:
             log(f"  [warn] सीन में दिक्कत, बिना कैप्शन दोबारा: {str(e)[:200]}")
-            scene_files.append(build_scene(i, media, audio, dur, W, H, None))
+            try:
+                scene_files.append(build_scene(i, media, dur, W, H, None))
+            except Exception as e2:
+                log(f"  [warn] फिर भी नहीं बना, सादा बैकग्राउंड: {str(e2)[:200]}")
+                g = WORK / f"grad_{i:02d}.jpg"
+                gradient_image(g, W, H)
+                scene_files.append(build_scene(i, {"path": str(g), "kind": "image"}, dur, W, H, None))
 
+    log(f"  कुल क्लिप: {clip_count} / सीन: {len(s['scenes'])}")
     stamp = datetime.utcnow().strftime("%Y%m%d_%H%M")
     final = OUT / f"{args.channel}_{kind}_{stamp}.mp4"
-    concat(scene_files, final)
+    silent = WORK / "silent.mp4"
+    voice_all = WORK / "voice_all.wav"
+    concat(scene_files, silent)
+    concat(voice_files, voice_all)
+    mux(silent, voice_all, final)
     log(f"🎬 वीडियो तैयार: {final.name} ({duration(final):.0f} सेकंड)")
 
     thumb = None
