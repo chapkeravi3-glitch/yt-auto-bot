@@ -1,11 +1,31 @@
 {
-  "gemini_models": ["gemini-flash-latest", "gemini-3.5-flash", "gemini-3.6-flash"],
+  "gemini_models": [
+    "gemini-flash-latest",
+    "gemini-3.5-flash",
+    "gemini-3.6-flash"
+  ],
   "channels": {
     "fact": {
       "name": "Fact India",
       "niche": "Surprising true facts about India, science, history, space, human body and the world, explained through the latest news",
-      "themes": ["Indian history facts", "science facts", "space and planets", "human body", "animals and nature", "famous places of India", "inventions", "world records", "geography"],
-      "news_queries": ["ISRO space India", "science discovery", "India world record", "NASA space news", "India history archaeology"],
+      "themes": [
+        "Indian history facts",
+        "science facts",
+        "space and planets",
+        "human body",
+        "animals and nature",
+        "famous places of India",
+        "inventions",
+        "world records",
+        "geography"
+      ],
+      "news_queries": [
+        "ISRO space India",
+        "science discovery",
+        "India world record",
+        "NASA space news",
+        "India history archaeology"
+      ],
       "use_news": true,
       "voice": "hi-IN-MadhurNeural",
       "gender": "Male",
@@ -15,13 +35,33 @@
       "privacy": "public",
       "client_id_secret": "YT_CLIENT_ID",
       "client_secret_secret": "YT_CLIENT_SECRET",
-      "token_secret": "YT_REFRESH_TOKEN_FACT"
+      "token_secret": "YT_REFRESH_TOKEN_FACT",
+      "visual_anchor": [],
+      "generic_queries": [],
+      "use_trends": true,
+      "focus_rule": "FOCUS: pick a trending topic of today (science, space, India, world records, discoveries) and explain the surprising facts behind it.",
+      "gemini_voice": "Charon"
     },
     "movies": {
       "name": "Movies",
-      "niche": "Latest film news plus verified trivia, behind-the-scenes facts, box office records and history of Bollywood and Hollywood films",
-      "themes": ["Bollywood classic films trivia", "Hollywood blockbuster facts", "behind the scenes of famous movies", "box office records", "legendary actors and directors career facts", "movie making techniques", "iconic film songs history"],
-      "news_queries": ["Bollywood box office", "Bollywood new movie release", "Hollywood box office", "film trailer release", "OTT new movies"],
+      "niche": "Trending Indian film and entertainment news for Indian audience: Bollywood, South Indian cinema, Indian OTT and web series, new releases, trailers, box office collections, celebrity news",
+      "themes": [
+        "Bollywood classic films trivia",
+        "Hollywood blockbuster facts",
+        "behind the scenes of famous movies",
+        "box office records",
+        "legendary actors and directors career facts",
+        "movie making techniques",
+        "iconic film songs history"
+      ],
+      "news_queries": [
+        "बॉलीवुड नई फिल्म",
+        "बॉक्स ऑफिस कलेक्शन",
+        "फिल्म ट्रेलर रिलीज़",
+        "साउथ फिल्म बॉक्स ऑफिस",
+        "OTT नई वेब सीरीज़",
+        "बॉलीवुड सितारे खबर"
+      ],
       "use_news": true,
       "voice": "hi-IN-MadhurNeural",
       "gender": "Male",
@@ -31,13 +71,48 @@
       "privacy": "public",
       "client_id_secret": "YT_CLIENT_ID",
       "client_secret_secret": "YT_CLIENT_SECRET",
-      "token_secret": "YT_REFRESH_TOKEN"
+      "token_secret": "YT_REFRESH_TOKEN",
+      "visual_anchor": [
+        "cinema",
+        "film",
+        "movie",
+        "bollywood",
+        "hollywood",
+        "actor"
+      ],
+      "generic_queries": [
+        "cinema theater audience",
+        "film camera shooting",
+        "movie clapperboard",
+        "red carpet premiere",
+        "cinema popcorn screen",
+        "film set director"
+      ],
+      "use_trends": true,
+      "focus_rule": "FOCUS: Indian audience. Choose Bollywood, South Indian (Telugu/Tamil/Malayalam/Kannada) films, Indian OTT/web series or Indian TV/film stars. Pick Hollywood ONLY if it is trending in India today. Prefer what is trending TODAY: new release, trailer, box office collection, award, celebrity news, controversy. Never choose old trivia while a trending item exists.",
+      "gemini_voice": "Puck"
     },
     "cricket": {
       "name": "Cricket",
       "niche": "Latest cricket news plus cricket history, records, legendary players, World Cup and IPL moments, verified stats and stories",
-      "themes": ["cricket world cup history", "legendary batsmen records", "great bowlers and spells", "IPL memorable moments", "famous India vs Pakistan matches", "captains and their achievements", "unbelievable cricket records", "cricket rules and history", "famous stadiums"],
-      "news_queries": ["India cricket team", "IPL", "cricket record", "Virat Kohli Rohit Sharma", "ICC cricket"],
+      "themes": [
+        "cricket world cup history",
+        "legendary batsmen records",
+        "great bowlers and spells",
+        "IPL memorable moments",
+        "famous India vs Pakistan matches",
+        "captains and their achievements",
+        "unbelievable cricket records",
+        "cricket rules and history",
+        "famous stadiums"
+      ],
+      "news_queries": [
+        "India cricket team",
+        "IPL",
+        "cricket record",
+        "Virat Kohli Rohit Sharma",
+        "ICC cricket"
+      ],
       "use_news": true,
       "voice": "hi-IN-MadhurNeural",
       "gender": "Male",
@@ -47,7 +122,25 @@
       "privacy": "public",
       "client_id_secret": "YT_CLIENT_ID",
       "client_secret_secret": "YT_CLIENT_SECRET",
-      "token_secret": "YT_REFRESH_TOKEN_CRICKET"
+      "token_secret": "YT_REFRESH_TOKEN_CRICKET",
+      "visual_anchor": [
+        "cricket"
+      ],
+      "generic_queries": [
+        "cricket match",
+        "cricket stadium crowd",
+        "cricket batsman hitting",
+        "cricket bowler bowling",
+        "cricket team celebration",
+        "cricket ball stumps",
+        "cricket fans cheering",
+        "cricket pitch ground"
+      ],
+      "use_trends": true,
+      "focus_rule": "FOCUS: whatever is trending in cricket TODAY (India matches, IPL, records, player news). Prefer news over old history.",
+      "gemini_voice": "Orus"
     }
-  }
+  },
+  "tts_engine": "gemini",
+  "tts_model": "gemini-2.5-flash-preview-tts"
 }
