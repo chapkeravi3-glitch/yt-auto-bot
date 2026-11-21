@@ -445,11 +445,12 @@ def openverse_images(q, orient):
     return out
 
 
-def diagnose():
+def diagnose(library_root=None):
     """रन की शुरुआत में बताता है कि कौन-कौन से स्रोत चालू हैं (लॉग में पहली लाइनें देखो)"""
     lines = [f"🔎 SERPER key: {'हाँ' if _key('SERPER_API_KEY') else 'नहीं'} | "
              f"PIXABAY key: {'हाँ' if _key('PIXABAY_API_KEY') else 'नहीं'} | "
              f"PEXELS key: {'हाँ' if _key('PEXELS_API_KEY') else 'नहीं'}"]
+    lines.append(f"🔎 अपनी फ़ोटो लाइब्रेरी: {library_stats(library_root)}")
     try:
         import ddgs  # noqa: F401
         lines.append("🔎 ddgs लाइब्रेरी: हाँ")
@@ -467,6 +468,84 @@ def diagnose():
     except Exception as e:
         lines.append(f"🔎 टेस्ट सर्च फेल: {str(e)[:100]}")
     return lines
+
+
+# ---------------------------------------------------------------- अपनी फ़ोटो लाइब्रेरी (repo के photos/ फ़ोल्डर में)
+# बनावट:  photos/<category>/<नाम-वाला-फ़ोल्डर>/फ़ोटो.jpg   जैसे photos/cricket/virat-kohli/..., photos/cricket/india-team/...
+# photos/<category>/general/ में किसी भी टॉपिक की आम फ़ोटो रखो: कोई नाम न मिले तो उसी से उठेंगी
+LIB_EXT = (".jpg", ".jpeg", ".png", ".webp")
+LIB_STOP = {"the", "and", "for", "with"}
+# ये आम शब्द फ़ोल्डर के नाम में हों तो मैचिंग में नहीं गिने जाते (जैसे india-team में सिर्फ़ 'india' गिना जाएगा)
+LIB_GENERIC = {"team", "cricket", "national", "match", "matches", "player", "players", "film", "movie",
+               "movies", "photo", "photos", "stadium", "world", "cup", "new"}
+
+
+def _tok(s):
+    return {w for w in re.findall(r"[a-z0-9]+", (s or "").lower()) if len(w) > 2 and w not in LIB_STOP}
+
+
+def library_stats(root):
+    root = Path(root) if root else None
+    if not root or not root.is_dir():
+        return "फ़ोल्डर photos/ अभी नहीं है"
+    n = sum(1 for p in root.rglob("*") if p.suffix.lower() in LIB_EXT)
+    cats = sorted(d.name for d in root.iterdir() if d.is_dir())
+    return f"{n} फ़ोटो, फ़ोल्डर: {', '.join(cats) if cats else '-'}"
+
+
+def _lib_pick_file(files, used):
+    random.shuffle(files)
+    for f in files:
+        if str(f) in used:
+            continue
+        try:
+            with Image.open(f) as im:
+                im.verify()
+            with Image.open(f) as im:
+                if min(im.size) < 400:
+                    continue
+        except Exception:
+            continue
+        return f
+    return None
+
+
+def _try_library(root, category, entities, queries, used):
+    base = Path(root) / category
+    if not base.is_dir():
+        return None
+    qtok = set()
+    for s in list(entities or []) + list(queries or []):
+        qtok |= _tok(s)
+    cands = []
+    for d in sorted(p for p in base.iterdir() if p.is_dir()):
+        if d.name.lower() in ("general", "misc", "common"):
+            continue
+        order = [w for w in re.findall(r"[a-z0-9]+", d.name.lower().replace("_", " "))
+                 if len(w) > 2 and w not in LIB_STOP and w not in LIB_GENERIC]
+        ft = set(order)
+        hit = ft & qtok
+        # फ़ोल्डर के लगभग सारे ख़ास शब्द मिलें, या नाम का आख़िरी शब्द (surname) मिले
+        if ft and hit and (len(hit) / len(ft) >= 0.75 or
+                           (len(order) >= 2 and order[-1] in hit and len(order[-1]) >= 5)):
+            files = [x for x in d.iterdir() if x.suffix.lower() in LIB_EXT]
+            if files:
+                cands.append((len(hit) / len(ft), len(hit), d, files))
+    cands.sort(key=lambda x: (x[0], x[1]), reverse=True)
+    for _, _, d, files in cands:                       # सबसे सटीक फ़ोल्डर पहले
+        f = _lib_pick_file(files, used)
+        if f:
+            used.add(str(f))
+            log(f"    ✔ अपनी लाइब्रेरी से फ़ोटो ({d.name})")
+            return {"path": str(f), "kind": "image", "credit": "", "library": True}
+    gen = base / "general"
+    if gen.is_dir():
+        f = _lib_pick_file([x for x in gen.iterdir() if x.suffix.lower() in LIB_EXT], used)
+        if f:
+            used.add(str(f))
+            log("    ✔ अपनी लाइब्रेरी से आम फ़ोटो (general)")
+            return {"path": str(f), "kind": "image", "credit": "", "library": True}
+    return None
 
 
 VIDEO_SOURCES = (pexels_videos, pixabay_videos)
@@ -501,9 +580,14 @@ def _query_variants(queries, anchors, generic):
 
 # ---------------------------------------------------------------- मुख्य
 def pick_media(queries, visual_en, orient, work, i, used, want_video=True,
-               anchors=None, generic=None, entities=None, web_search=False):
+               anchors=None, generic=None, entities=None, web_search=False,
+               library=None, category=""):
     work = Path(work)
     anchors = [a for a in (anchors or []) if a]
+    if library and category:                       # सबसे पहले अपनी लाइब्रेरी की फ़ोटो
+        m = _try_library(library, category, entities, queries, used)
+        if m:
+            return m
     if entities:                                   # नाम वाली चीज़ हो तो पहले उसकी असली फ़ोटो
         m = _try_entities(entities, work, i, used, orient)
         if m:
