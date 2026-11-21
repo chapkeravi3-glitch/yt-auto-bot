@@ -5,3 +5,4 @@ sentence-transformers
 google-api-python-client
 google-auth
 google-auth-httplib2
+ddgs
