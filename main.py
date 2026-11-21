@@ -727,7 +727,7 @@ def main():
                     f"Settings → Secrets में यह नाम बनाओ (या config.json में सही नाम लिखो)")
 
     log(f"▶ चैनल: {ch['name']} | प्रकार: {kind}")
-    for line in IF.diagnose():
+    for line in IF.diagnose(ROOT / "photos"):
         log(line)
     headlines = fetch_news(ch, recent) if ch.get("use_news", True) else []
     trends = fetch_trends() if ch.get("use_trends", True) else []
@@ -750,7 +750,8 @@ def main():
             media = IF.pick_media(sc.get("image_queries", []), sc.get("visual_en", ""),
                                   orient, WORK, i, used_ids, want_video,
                                   ch.get("visual_anchor", []), ch.get("generic_queries", []),
-                                  sc.get("entities", []), cfg.get("web_images", True))
+                                  sc.get("entities", []), cfg.get("web_images", True),
+                                  str(ROOT / "photos"), ch.get("library_category", args.channel))
         except Exception as e:
             log(f"  [warn] फ़ोटो/क्लिप खोजने में दिक्कत: {str(e)[:150]}")
             media = None
@@ -769,7 +770,7 @@ def main():
                 clip_count += 1
             if media["credit"] and media["credit"] not in credits:
                 credits.append(media["credit"])
-        if first_img is None and media["kind"] == "image" and media["credit"]:
+        if first_img is None and media["kind"] == "image" and not media.get("textcard"):
             first_img = media["path"]
         elif first_img is None and media["kind"] == "video":
             first_img = grab_frame(media["path"], WORK / f"frame_{i:02d}.jpg")
