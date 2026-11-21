@@ -351,12 +351,45 @@ def bing_images(q, need_words=None):
     return out
 
 
+def serper_images(q, need_words=None):
+    """Google Images के नतीजे (serper.dev API)। GitHub के सर्वर पर भी चलता है, ऐप जैसी ही फ़ोटो मिलती हैं"""
+    k = _key("SERPER_API_KEY")
+    if not k:
+        return []
+    try:
+        r = requests.post("https://google.serper.dev/images",
+                          headers={"X-API-KEY": k, "Content-Type": "application/json"},
+                          json={"q": q, "gl": "in", "hl": "en", "num": 30}, timeout=30)
+    except Exception as e:
+        log(f"    [warn] Serper ({q}): {str(e)[:80]}")
+        return []
+    if r.status_code != 200:
+        log(f"    [warn] Serper {r.status_code}: {r.text[:120]}")
+        return []
+    out = []
+    for it in r.json().get("images", []):
+        u = it.get("imageUrl") or ""
+        w, h = it.get("imageWidth") or 0, it.get("imageHeight") or 0
+        if not u or _bad_ext(u):
+            continue
+        if w and h and (max(w, h) < 800 or min(w, h) < 450):
+            continue
+        title = ((it.get("title") or "") + " " + u).lower()
+        if need_words and not any(x in title for x in need_words):
+            continue
+        out.append({"url": u, "id": f"srp{abs(hash(u))}", "text": title,
+                    "credit": f"फ़ोटो: {it.get('source') or _domain(it.get('link') or u)}",
+                    "headers": BROWSER_UA})
+    return out
+
+
 def web_images(q, need_words=None):
     """वेब से फ़ोटो: DuckDuckGo + Bing दोनों (ImageSearchMan जैसा)"""
+    s = serper_images(q, need_words)
     a = ddg_images(q, need_words)
     b = bing_images(q, need_words)
-    log(f"    वेब सर्च '{q}': DuckDuckGo {len(a)}, Bing {len(b)} फ़ोटो")
-    mixed = []
+    log(f"    वेब सर्च '{q}': Serper {len(s)}, DuckDuckGo {len(a)}, Bing {len(b)} फ़ोटो")
+    mixed = list(s)
     for x, y in zip(a, b):
         mixed += [y, x]
     mixed += a[len(b):] + b[len(a):]
@@ -414,7 +447,8 @@ def openverse_images(q, orient):
 
 def diagnose():
     """रन की शुरुआत में बताता है कि कौन-कौन से स्रोत चालू हैं (लॉग में पहली लाइनें देखो)"""
-    lines = [f"🔎 PIXABAY key: {'हाँ' if _key('PIXABAY_API_KEY') else 'नहीं'} | "
+    lines = [f"🔎 SERPER key: {'हाँ' if _key('SERPER_API_KEY') else 'नहीं'} | "
+             f"PIXABAY key: {'हाँ' if _key('PIXABAY_API_KEY') else 'नहीं'} | "
              f"PEXELS key: {'हाँ' if _key('PEXELS_API_KEY') else 'नहीं'}"]
     try:
         import ddgs  # noqa: F401
@@ -427,6 +461,7 @@ def diagnose():
             lines.append("🔎 ddgs लाइब्रेरी: नहीं (requirements.txt में 'ddgs' जोड़ो)")
     try:
         lines.append(f"🔎 टेस्ट सर्च 'cricket stadium': Bing {len(bing_images('cricket stadium'))}, "
+                     f"Serper {len(serper_images('cricket stadium'))}, "
                      f"Openverse {len(openverse_images('cricket stadium', 'landscape'))}, "
                      f"Wikipedia {len(wiki_images('Virat Kohli'))}")
     except Exception as e:
