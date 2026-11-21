@@ -1,335 +1,255 @@
+#!/usr/bin/env python3
 """
-image_finder.py
-लाइसेंस वाली (फ्री) फ़ोटो और वीडियो क्लिप ढूँढने वाला मॉड्यूल।
+image_finder.py - टॉपिक से जुड़ी HD फ़ोटो और वीडियो क्लिप ढूँढता है
 
-सोर्स (बिना key के): Openverse, Wikimedia Commons, NASA
-सोर्स (key हो तो):   Pixabay (फ़ोटो+वीडियो), Pexels (फ़ोटो+वीडियो)
-सबसे सही फ़ोटो चुनने के लिए CLIP (ओपन-सोर्स AI) इस्तेमाल होता है।
+स्रोत (क्रम से):  Pixabay वीडियो/फ़ोटो  →  Pexels वीडियो/फ़ोटो (अगर PEXELS_API_KEY हो)  →  Wikimedia Commons फ़ोटो
+GitHub Secrets:   PIXABAY_API_KEY (ज़रूरी),  PEXELS_API_KEY (वैकल्पिक, मुफ़्त, पर क्लिप बहुत बेहतर मिलती हैं)
+
+main.py इसे ऐसे बुलाता है:
+    media = pick_media(queries, visual_en, orient, work_dir, scene_no, used_urls, want_video)
+    लौटाता है {"path": ..., "kind": "video"|"image", "credit": ...} या None
 """
-import io
 import os
-import re
 import random
+import re
+import subprocess
+import time
+from pathlib import Path
+
 import requests
-from concurrent.futures import ThreadPoolExecutor
-from PIL import Image
+from PIL import Image, ImageStat
 
-UA = {"User-Agent": "yt-auto-bot/1.0 (educational project; contact: github)"}
-TIMEOUT = 25
-MAX_CAND = 24          # एक सीन के लिए CLIP को कितनी फ़ोटो दिखानी हैं
-MIN_SIDE = 600         # इससे छोटी फ़ोटो रिजेक्ट
-DISABLED = set()       # जिस सोर्स की लिमिट पूरी हो गई, इस रन में बंद
+UA = {"User-Agent": "Mozilla/5.0 (yt-auto-bot)"}
+_CACHE = {}
 
 
-# ---------------------------------------------------------------- helpers
-def _get_json(url, source, params=None, headers=None):
-    if source in DISABLED:
-        return None
-    try:
-        r = requests.get(url, params=params, headers=headers or UA, timeout=TIMEOUT)
-        if r.status_code == 429:
-            print(f"  [warn] {source}: लिमिट पूरी, इस रन में बंद")
-            DISABLED.add(source)
-            return None
-        if r.status_code in (400, 401, 403):
-            # key गलत/बंद है। URL में key होती है, इसलिए URL लॉग में नहीं छापते
-            print(f"  [warn] {source}: key या रिक्वेस्ट गलत ({r.status_code}) "
-                  f"{r.text[:80]!r}, इस रन में बंद")
-            DISABLED.add(source)
-            return None
-        r.raise_for_status()
-        return r.json()
-    except Exception as e:
-        msg = re.sub(r"key=[^&\s]+", "key=***", str(e))
-        print(f"  [warn] {source}: {msg[:120]}")
-        return None
+def log(*a):
+    print(*a, flush=True)
 
 
-def _strip_html(s):
-    return re.sub(r"<[^>]+>", "", s or "").strip()
+def _key(name):
+    return os.environ.get(name, "").strip()
 
 
-# ---------------------------------------------------------------- sources
-def _openverse(q, n=8):
-    d = _get_json("https://api.openverse.org/v1/images/", "openverse", params={
-        "q": q, "page_size": n, "license_type": "commercial,modification",
-        "extension": "jpg"})
-    out = []
-    for r in (d or {}).get("results", []):
-        if not r.get("url"):
-            continue
-        lic = f'{(r.get("license") or "").upper()} {r.get("license_version") or ""}'.strip()
-        out.append({
-            "kind": "image", "source": "openverse", "url": r["url"],
-            "thumb": r.get("thumbnail") or r["url"],
-            "w": r.get("width"), "h": r.get("height"),
-            "credit": f'"{r.get("title") or "photo"}" by {r.get("creator") or "unknown"} '
-                      f'({lic}) {r.get("foreign_landing_url") or ""}'.strip(),
-        })
-    return out
-
-
-def _wikimedia(q, n=8):
-    d = _get_json("https://commons.wikimedia.org/w/api.php", "wikimedia", params={
-        "action": "query", "format": "json", "generator": "search",
-        "gsrsearch": f"{q} filetype:bitmap", "gsrnamespace": 6, "gsrlimit": n,
-        "prop": "imageinfo", "iiprop": "url|size|mime|extmetadata",
-        "iiurlwidth": 640})
-    out = []
-    pages = ((d or {}).get("query") or {}).get("pages", {})
-    for p in pages.values():
-        info = (p.get("imageinfo") or [None])[0]
-        if not info or info.get("mime") not in ("image/jpeg", "image/png"):
-            continue
-        if min(info.get("width", 0), info.get("height", 0)) < MIN_SIDE:
-            continue
-        meta = info.get("extmetadata") or {}
-        artist = _strip_html((meta.get("Artist") or {}).get("value"))[:60] or "unknown"
-        lic = (meta.get("LicenseShortName") or {}).get("value", "")
-        out.append({
-            "kind": "image", "source": "wikimedia", "url": info["url"],
-            "thumb": info.get("thumburl") or info["url"],
-            "w": info.get("width"), "h": info.get("height"),
-            "credit": f'{p.get("title", "").replace("File:", "")} by {artist} '
-                      f'({lic}) via Wikimedia Commons',
-        })
-    return out
-
-
-def _nasa(q, n=4):
-    d = _get_json("https://images-api.nasa.gov/search", "nasa",
-                  params={"q": q, "media_type": "image", "page_size": n})
-    out = []
-    items = ((d or {}).get("collection") or {}).get("items", [])
-    for it in items[:n]:
-        data = (it.get("data") or [{}])[0]
-        nid = data.get("nasa_id")
-        links = it.get("links") or []
-        if not nid or not links:
-            continue
-        q_id = requests.utils.quote(nid)
-        out.append({
-            "kind": "image", "source": "nasa",
-            "url": f"https://images-assets.nasa.gov/image/{q_id}/{q_id}~medium.jpg",
-            "thumb": links[0]["href"], "w": None, "h": None,
-            "credit": f'{data.get("title", "NASA image")} - NASA',
-        })
-    return out
-
-
-def _pixabay(q, orient, want_video, n=8):
-    key = os.environ.get("PIXABAY_API_KEY")
-    if not key:
-        return []
-    out = []
-    d = _get_json("https://pixabay.com/api/", "pixabay", params={
-        "key": key, "q": q[:100], "image_type": "photo", "per_page": n,
-        "safesearch": "true", "min_width": 900,
-        "orientation": "vertical" if orient == "portrait" else "horizontal"})
-    for h in (d or {}).get("hits", []):
-        out.append({
-            "kind": "image", "source": "pixabay",
-            "url": h.get("largeImageURL") or h.get("webformatURL"),
-            "thumb": h.get("webformatURL"),
-            "w": h.get("imageWidth"), "h": h.get("imageHeight"),
-            "credit": f'Pixabay - {h.get("user", "")} - {h.get("pageURL", "")}',
-        })
-    if want_video:
-        d = _get_json("https://pixabay.com/api/videos/", "pixabay", params={
-            "key": key, "q": q[:100], "per_page": n, "safesearch": "true"})
-        for h in (d or {}).get("hits", []):
-            v = (h.get("videos") or {})
-            pick = v.get("medium") if (v.get("medium") or {}).get("url") else v.get("small")
-            if not pick or not pick.get("url"):
-                continue
-            out.append({
-                "kind": "video", "source": "pixabay", "url": pick["url"],
-                "thumb": pick.get("thumbnail"), "w": pick.get("width"), "h": pick.get("height"),
-                "credit": f'Pixabay video - {h.get("user", "")} - {h.get("pageURL", "")}',
-            })
-    return [c for c in out if c.get("url") and c.get("thumb")]
-
-
-def _pexels(q, orient, want_video, n=8):
-    key = os.environ.get("PEXELS_API_KEY")
-    if not key:
-        return []
-    hdr = {"Authorization": key, **UA}
-    out = []
-    d = _get_json("https://api.pexels.com/v1/search", "pexels", headers=hdr,
-                  params={"query": q, "per_page": n, "orientation": orient})
-    for p in (d or {}).get("photos", []):
-        src = p.get("src", {})
-        out.append({
-            "kind": "image", "source": "pexels", "url": src.get("large2x") or src.get("large"),
-            "thumb": src.get("medium"), "w": p.get("width"), "h": p.get("height"),
-            "credit": f'Pexels - {p.get("photographer", "")} - {p.get("url", "")}',
-        })
-    if want_video:
-        d = _get_json("https://api.pexels.com/videos/search", "pexels", headers=hdr,
-                      params={"query": q, "per_page": n, "orientation": orient})
-        for v in (d or {}).get("videos", []):
-            files = [f for f in v.get("video_files", [])
-                     if f.get("file_type") == "video/mp4" and f.get("width")]
-            if not files:
-                continue
-            best = min(files, key=lambda f: abs(f["width"] - 1280))
-            out.append({
-                "kind": "video", "source": "pexels", "url": best["link"],
-                "thumb": v.get("image"), "w": best.get("width"), "h": best.get("height"),
-                "credit": f'Pexels video - {(v.get("user") or {}).get("name", "")} - {v.get("url", "")}',
-            })
-    return [c for c in out if c.get("url") and c.get("thumb")]
-
-
-def search_all(q, orient, want_video):
-    c = []
-    c += _wikimedia(q)
-    c += _openverse(q)
-    c += _pixabay(q, orient, want_video)
-    c += _pexels(q, orient, want_video)
-    c += _nasa(q)
-    return c
-
-
-# ---------------------------------------------------------------- ranking
-_clip = None
-
-
-def _load_clip():
-    global _clip
-    if _clip is None:
+def _get_json(url, params=None, headers=None):
+    """JSON माँगता है; 429 आने पर एक बार रुककर दोबारा"""
+    ck = (url, tuple(sorted((params or {}).items())))
+    if ck in _CACHE:
+        return _CACHE[ck]
+    data = None
+    for attempt in range(2):
         try:
-            from sentence_transformers import SentenceTransformer
-            _clip = SentenceTransformer("clip-ViT-B-32")
-            print("  CLIP मॉडल लोड हो गया")
+            r = requests.get(url, params=params, headers=headers or UA, timeout=30)
+            if r.status_code == 429:
+                time.sleep(20)
+                continue
+            if r.status_code == 200:
+                data = r.json()
+            else:
+                log(f"    [{url.split('/')[2]}] {r.status_code}: {r.text[:100]}")
+            break
         except Exception as e:
-            print(f"  [warn] CLIP नहीं चला ({str(e)[:100]}), सादा रैंकिंग इस्तेमाल होगी")
-            _clip = False
-    return _clip
+            log(f"    [{url.split('/')[2]}] नेटवर्क दिक्कत: {str(e)[:80]}")
+            time.sleep(2)
+    _CACHE[ck] = data
+    return data
 
 
-def _fetch_thumb(c):
+def _download(url, path, max_mb=80, headers=None):
     try:
-        r = requests.get(c["thumb"], headers=UA, timeout=TIMEOUT)
-        r.raise_for_status()
-        im = Image.open(io.BytesIO(r.content)).convert("RGB")
-        im.thumbnail((448, 448))
-        return im
+        with requests.get(url, stream=True, timeout=60, headers=headers or UA) as r:
+            if r.status_code != 200:
+                return False
+            size = 0
+            with open(path, "wb") as f:
+                for chunk in r.iter_content(1 << 20):
+                    size += len(chunk)
+                    if size > max_mb * (1 << 20):
+                        return False
+                    f.write(chunk)
+        return size > 20_000
     except Exception:
-        return None
+        return False
 
 
-def _round_robin(cands):
-    groups = {}
-    for c in cands:
-        groups.setdefault(c["source"], []).append(c)
+# ---------------------------------------------------------------- जाँच
+def _image_ok(path, orient):
+    try:
+        im = Image.open(path).convert("RGB")
+    except Exception:
+        return False
+    w, h = im.size
+    if min(w, h) < 700 or max(w, h) < 1000:
+        return False
+    small = im.resize((64, 64))
+    st = ImageStat.Stat(small.convert("L"))
+    if st.mean[0] < 28 or st.stddev[0] < 14:       # लगभग काली / सपाट फ़ोटो
+        return False
+    return True
+
+
+def _video_ok(path):
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+             "stream=width,height", "-of", "csv=p=0", str(path)],
+            capture_output=True, text=True, timeout=30).stdout.strip()
+        w, h = [int(x) for x in out.split(",")[:2]]
+        return max(w, h) >= 1000
+    except Exception:
+        return False
+
+
+# ---------------------------------------------------------------- स्रोत: हर एक cands की लिस्ट देता है
+# cand = {"url":..., "id":..., "credit":..., "headers":...}
+def pixabay_videos(q, orient):
+    k = _key("PIXABAY_API_KEY")
+    if not k:
+        return []
+    d = _get_json("https://pixabay.com/api/videos/",
+                  {"key": k, "q": q[:100], "per_page": 20, "safesearch": "true"})
     out = []
-    while any(groups.values()):
-        for k in list(groups):
-            if groups[k]:
-                out.append(groups[k].pop(0))
+    for h in (d or {}).get("hits", []):
+        vids = h.get("videos", {})
+        order = ("large", "medium") if orient == "portrait" else ("medium", "large")
+        for name in order:
+            v = vids.get(name) or {}
+            if v.get("url") and v.get("width", 0) >= 1280:
+                out.append({"url": v["url"], "id": f"pxv{h['id']}",
+                            "credit": f"वीडियो: {h.get('user', '')} / Pixabay"})
+                break
     return out
 
 
-def rank(cands, text, orient, want_video):
-    with ThreadPoolExecutor(8) as ex:
-        thumbs = list(ex.map(_fetch_thumb, cands))
-    pairs = [(c, im) for c, im in zip(cands, thumbs) if im is not None]
-    if not pairs:
+def pexels_videos(q, orient):
+    k = _key("PEXELS_API_KEY")
+    if not k:
         return []
-    model = _load_clip()
-    if model:
-        try:
-            from sentence_transformers import util
-            img_emb = model.encode([im for _, im in pairs], batch_size=16,
-                                   convert_to_tensor=True, show_progress_bar=False)
-            txt_emb = model.encode([text[:200]], convert_to_tensor=True,
-                                   show_progress_bar=False)
-            sims = util.cos_sim(txt_emb, img_emb)[0].tolist()
-        except Exception as e:
-            print(f"  [warn] CLIP स्कोर नहीं बना: {str(e)[:100]}")
-            sims = [random.random() * 0.1 for _ in pairs]
-    else:
-        sims = [random.random() * 0.1 for _ in pairs]
-    scored = []
-    for (c, im), s in zip(pairs, sims):
-        bonus = 0.0
-        portrait = im.height > im.width
-        if (orient == "portrait") == portrait:
-            bonus += 0.02
-        if want_video and c["kind"] == "video":
-            bonus += 0.03
-        scored.append((s + bonus, c))
-    scored.sort(key=lambda x: x[0], reverse=True)
-    return scored
+    d = _get_json("https://api.pexels.com/videos/search",
+                  {"query": q, "per_page": 15, "orientation": orient, "size": "medium"},
+                  {"Authorization": k, **UA})
+    out = []
+    for v in (d or {}).get("videos", []):
+        files = [f for f in v.get("video_files", [])
+                 if f.get("file_type") == "video/mp4" and f.get("link")
+                 and 1000 <= max(f.get("width") or 0, f.get("height") or 0) <= 2200]
+        if not files:
+            continue
+        files.sort(key=lambda f: abs(max(f["width"], f["height"]) - 1920))
+        out.append({"url": files[0]["link"], "id": f"pev{v['id']}",
+                    "credit": f"वीडियो: {v.get('user', {}).get('name', '')} / Pexels"})
+    return out
 
 
-# ---------------------------------------------------------------- download
-def download(c, work, idx):
-    work = str(work)
-    if c["kind"] == "video":
-        path = os.path.join(work, f"media_{idx:02d}.mp4")
-        try:
-            with requests.get(c["url"], headers=UA, timeout=60, stream=True) as r:
-                r.raise_for_status()
-                size = 0
-                with open(path, "wb") as f:
-                    for chunk in r.iter_content(1 << 20):
-                        size += len(chunk)
-                        if size > 80 * (1 << 20):
-                            raise RuntimeError("वीडियो बहुत बड़ा")
-                        f.write(chunk)
-            return path
-        except Exception as e:
-            print(f"  [warn] वीडियो डाउनलोड नहीं हुआ: {str(e)[:100]}")
-            return None
-    path = os.path.join(work, f"media_{idx:02d}.jpg")
-    for u in (c["url"], c["thumb"]):
-        try:
-            r = requests.get(u, headers=UA, timeout=40)
-            r.raise_for_status()
-            im = Image.open(io.BytesIO(r.content)).convert("RGB")
-            if min(im.size) < MIN_SIDE:
+def pixabay_images(q, orient):
+    k = _key("PIXABAY_API_KEY")
+    if not k:
+        return []
+    d = _get_json("https://pixabay.com/api/",
+                  {"key": k, "q": q[:100], "image_type": "photo", "per_page": 20,
+                   "orientation": "vertical" if orient == "portrait" else "horizontal",
+                   "min_width": 1000 if orient == "landscape" else 0,
+                   "min_height": 1000 if orient == "portrait" else 0,
+                   "safesearch": "true", "order": "popular"})
+    out = []
+    for h in (d or {}).get("hits", []):
+        u = h.get("largeImageURL")
+        if u:
+            out.append({"url": u, "id": f"pxi{h['id']}",
+                        "credit": f"फ़ोटो: {h.get('user', '')} / Pixabay"})
+    return out
+
+
+def pexels_images(q, orient):
+    k = _key("PEXELS_API_KEY")
+    if not k:
+        return []
+    d = _get_json("https://api.pexels.com/v1/search",
+                  {"query": q, "per_page": 15, "orientation": orient, "size": "large"},
+                  {"Authorization": k, **UA})
+    out = []
+    for p in (d or {}).get("photos", []):
+        u = p.get("src", {}).get("large2x") or p.get("src", {}).get("large")
+        if u:
+            out.append({"url": u, "id": f"pei{p['id']}",
+                        "credit": f"फ़ोटो: {p.get('photographer', '')} / Pexels"})
+    return out
+
+
+def commons_images(q, orient):
+    d = _get_json("https://commons.wikimedia.org/w/api.php",
+                  {"action": "query", "format": "json", "generator": "search",
+                   "gsrsearch": f"filetype:bitmap {q}", "gsrnamespace": 6, "gsrlimit": 15,
+                   "prop": "imageinfo", "iiprop": "url|size|extmetadata", "iiurlwidth": 1600})
+    out = []
+    for p in ((d or {}).get("query", {}).get("pages", {}) or {}).values():
+        info = (p.get("imageinfo") or [{}])[0]
+        u = info.get("thumburl") or info.get("url")
+        if not u or info.get("width", 0) < 1200 or u.lower().endswith((".svg", ".gif")):
+            continue
+        artist = re.sub(r"<[^>]+>", "", info.get("extmetadata", {}).get("Artist", {}).get("value", ""))
+        out.append({"url": u, "id": f"wc{p.get('pageid')}",
+                    "credit": f"फ़ोटो: {artist[:40]} / Wikimedia Commons"})
+    return out
+
+
+VIDEO_SOURCES = (pexels_videos, pixabay_videos)
+IMAGE_SOURCES = (pexels_images, pixabay_images, commons_images)
+
+
+# ---------------------------------------------------------------- खोज के शब्द
+def _query_variants(queries, visual_en):
+    qs = [q.strip() for q in queries if q and q.strip()]
+    for q in list(qs):
+        w = q.split()
+        if len(w) > 2:
+            qs.append(" ".join(w[:2]))
+    for q in list(queries or []):
+        w = q.split()
+        if len(w) > 1:
+            qs.append(w[-1])
+    if visual_en:
+        words = [w for w in re.findall(r"[A-Za-z]+", visual_en) if len(w) > 3]
+        if words:
+            qs.append(" ".join(words[:3]))
+    seen, out = set(), []
+    for q in qs:
+        if q.lower() not in seen:
+            seen.add(q.lower())
+            out.append(q)
+    return out[:7]
+
+
+# ---------------------------------------------------------------- मुख्य
+def pick_media(queries, visual_en, orient, work, i, used, want_video=True):
+    work = Path(work)
+    qs = _query_variants(queries, visual_en)
+    order = ("video", "image") if want_video else ("image", "video")
+    for kind in order:
+        sources = VIDEO_SOURCES if kind == "video" else IMAGE_SOURCES
+        for q in qs:
+            cands = []
+            for src in sources:
+                try:
+                    cands += src(q, orient)
+                except Exception as e:
+                    log(f"    [warn] {src.__name__}: {str(e)[:80]}")
+            cands = [c for c in cands if c["id"] not in used]
+            if not cands:
                 continue
-            im.save(path, quality=92)
-            return path
-        except Exception:
-            continue
-    return None
-
-
-# ---------------------------------------------------------------- main API
-def pick_media(queries, describe, orient, work, idx, used, want_video=False):
-    """सीन के लिए सबसे सही फ़ोटो/क्लिप चुनकर डाउनलोड करता है।
-    लौटाता है {"path","kind","credit"} या None"""
-    qs = []
-    for q in queries or []:
-        q = (q or "").strip()
-        if q and q not in qs:
-            qs.append(q)
-    if not qs:
-        return None
-    cands = []
-    for q in qs[:2]:
-        cands += search_all(q, orient, want_video)
-    if len(cands) < 4:  # कम मिला तो खोज को छोटा करके दोबारा
-        short_q = " ".join(qs[0].split()[:2])
-        cands += search_all(short_q, orient, want_video)
-    seen, uniq = set(), []
-    for c in cands:
-        if not c.get("url") or c["url"] in seen or c["url"] in used:
-            continue
-        seen.add(c["url"])
-        uniq.append(c)
-    if not uniq:
-        return None
-    uniq = _round_robin(uniq)[:MAX_CAND]
-    ranked = rank(uniq, describe or " ".join(qs), orient, want_video)
-    for score, c in ranked[:6]:
-        p = download(c, work, idx)
-        if p:
-            used.add(c["url"])
-            print(f"  चुनी: {c['source']} {c['kind']} (स्कोर {score:.3f})")
-            return {"path": p, "kind": c["kind"], "credit": c.get("credit", "")}
+            top = cands[:10]
+            random.shuffle(top)
+            for c in top[:3]:
+                ext = ".mp4" if kind == "video" else ".jpg"
+                path = work / f"media_{i:02d}{ext}"
+                if not _download(c["url"], path, max_mb=80 if kind == "video" else 25):
+                    continue
+                ok = _video_ok(path) if kind == "video" else _image_ok(path, orient)
+                if not ok:
+                    path.unlink(missing_ok=True)
+                    continue
+                used.add(c["id"])
+                log(f"    ✔ {'क्लिप' if kind == 'video' else 'फ़ोटो'} मिली ({q}) - {c['credit']}")
+                return {"path": str(path), "kind": kind, "credit": c["credit"]}
+        log(f"    {'क्लिप' if kind == 'video' else 'फ़ोटो'} नहीं मिली, दूसरा तरीका")
     return None
