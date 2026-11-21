@@ -10,6 +10,8 @@ v2 में बदलाव:
 
 स्रोत: Pexels वीडियो/फ़ोटो (अगर PEXELS_API_KEY हो), Pixabay वीडियो/फ़ोटो (PIXABAY_API_KEY)
 """
+import html
+import json
 import os
 import random
 import re
@@ -20,7 +22,7 @@ from pathlib import Path
 import requests
 from PIL import Image, ImageStat
 
-UA = {"User-Agent": "Mozilla/5.0 (yt-auto-bot)"}
+UA = {"User-Agent": "yt-auto-bot/1.0 (automated video maker; contact via GitHub) Mozilla/5.0"}
 _CACHE = {}
 
 
@@ -73,20 +75,23 @@ def _download(url, path, max_mb=80, headers=None):
 
 
 # ---------------------------------------------------------------- जाँच
-def _image_ok(path, orient):
+def _image_ok(path, orient, relaxed=False):
     try:
         im = Image.open(path).convert("RGB")
     except Exception:
         return False
     w, h = im.size
-    if min(w, h) < 700 or max(w, h) < 1000:
+    if relaxed:
+        if min(w, h) < 450 or max(w, h) < 800:
+            return False
+    elif min(w, h) < 700 or max(w, h) < 1000:
         return False
     small = im.resize((64, 64))
     st = ImageStat.Stat(small.convert("L"))
     if st.mean[0] < 28 or st.stddev[0] < 14:            # लगभग काली / सपाट फ़ोटो
         return False
     sat = ImageStat.Stat(small.convert("HSV")).mean[1] / 255.0
-    if sat < 0.10:                                       # काली-सफ़ेद / पुरानी फ़ोटो
+    if sat < (0.04 if relaxed else 0.10):                # काली-सफ़ेद / पुरानी फ़ोटो
         return False
     return True
 
@@ -192,8 +197,245 @@ def pexels_images(q, orient):
     return out
 
 
+# ---------------------------------------------------------------- नाम वाली चीज़ों की असली फ़ोटो (Wikipedia / Commons)
+# खिलाड़ी, टीम, स्टेडियम, फ़िल्म, जगह जैसे नाम के लिए: मुफ़्त लाइसेंस वाली असली फ़ोटो, क्रेडिट के साथ
+def wiki_images(name):
+    d = _get_json("https://en.wikipedia.org/w/api.php",
+                  {"action": "query", "format": "json", "generator": "search", "gsrsearch": name,
+                   "gsrlimit": 2, "prop": "pageimages", "piprop": "original|thumbnail",
+                   "pithumbsize": 1600})
+    pages = sorted(((d or {}).get("query", {}).get("pages", {}) or {}).values(),
+                   key=lambda p: p.get("index", 99))
+    words = [w for w in re.findall(r"[a-z]+", name.lower()) if len(w) > 2]
+    out = []
+    for p in pages[:1]:
+        title = p.get("title", "").lower()
+        if words and not any(w in title for w in words):
+            continue
+        th = p.get("thumbnail") or {}
+        orig = (p.get("original") or {}).get("source", "").lower()
+        if not th or "logo" in orig or orig.endswith((".svg", ".gif")) or th.get("width", 0) < 900:
+            continue
+        out.append({"url": th["source"], "id": f"wp{p['pageid']}", "text": "",
+                    "credit": f"फ़ोटो: Wikipedia/Wikimedia Commons ({p.get('title', '')})"})
+    return out
+
+
+def commons_entity_images(name):
+    d = _get_json("https://commons.wikimedia.org/w/api.php",
+                  {"action": "query", "format": "json", "generator": "search",
+                   "gsrsearch": f"filetype:bitmap {name}", "gsrnamespace": 6, "gsrlimit": 12,
+                   "prop": "imageinfo", "iiprop": "url|size|extmetadata", "iiurlwidth": 1600})
+    words = [w for w in re.findall(r"[a-z]+", name.lower()) if len(w) > 2]
+    pages = sorted(((d or {}).get("query", {}).get("pages", {}) or {}).values(),
+                   key=lambda p: p.get("index", 99))
+    out = []
+    for p in pages:
+        title = p.get("title", "").lower()
+        if any(x in title for x in ("logo", "signature", "flag", "map", "poster", "stamp")):
+            continue
+        if words and not any(w in title for w in words):
+            continue
+        info = (p.get("imageinfo") or [{}])[0]
+        u = info.get("thumburl") or info.get("url")
+        if not u or info.get("width", 0) < 1200 or u.lower().endswith((".svg", ".gif")):
+            continue
+        meta = info.get("extmetadata", {})
+        yr = re.search(r"(19|20)\d\d", (meta.get("DateTimeOriginal", {}) or {}).get("value", ""))
+        if yr and int(yr.group(0)) < 2010:               # बहुत पुरानी फ़ोटो नहीं
+            continue
+        artist = re.sub(r"<[^>]+>", "", (meta.get("Artist", {}) or {}).get("value", ""))[:40]
+        lic = (meta.get("LicenseShortName", {}) or {}).get("value", "")
+        out.append({"url": u, "id": f"wc{p.get('pageid')}", "text": "",
+                    "credit": f"फ़ोटो: {artist} / Wikimedia Commons {lic}".strip()})
+    return out
+
+
+def _try_entities(entities, work, i, used, orient):
+    for name in entities[:2]:
+        name = (name or "").strip()
+        if not name:
+            continue
+        try:
+            cands = wiki_images(name) + commons_entity_images(name)
+        except Exception as e:
+            log(f"    [warn] नाम से फ़ोटो खोजने में दिक्कत ({name}): {str(e)[:80]}")
+            continue
+        cands = [c for c in cands if c["id"] not in used]
+        for c in cands[:6]:
+            path = work / f"media_{i:02d}.jpg"
+            if not _download(c["url"], path, max_mb=25):
+                continue
+            if not _image_ok(path, orient):
+                path.unlink(missing_ok=True)
+                continue
+            used.add(c["id"])
+            log(f"    ✔ असली फ़ोटो मिली ({name}) - {c['credit']}")
+            return {"path": str(path), "kind": "image", "credit": c["credit"]}
+    return None
+
+
+# ---------------------------------------------------------------- वेब इमेज सर्च (इमेज डाउनलोडर ऐप जैसा)
+BROWSER_UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                            "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"}
+
+
+def _domain(u):
+    return re.sub(r"^https?://(www\.)?", "", u or "").split("/")[0]
+
+
+def _bad_ext(u):
+    return u.lower().split("?")[0].endswith((".svg", ".gif"))
+
+
+def ddg_images(q, need_words=None):
+    try:
+        from ddgs import DDGS
+    except ImportError:
+        try:
+            from duckduckgo_search import DDGS
+        except ImportError:
+            log("    [warn] ddgs लाइब्रेरी नहीं है: requirements.txt में 'ddgs' जोड़ो")
+            return []
+    res = []
+    for attempt in range(2):
+        try:
+            res = list(DDGS().images(q, region="in-en", safesearch="moderate", max_results=30))
+            break
+        except Exception as e:
+            log(f"    [warn] DuckDuckGo ({q}): {str(e)[:80]}")
+            time.sleep(4)
+    out = []
+    for r in res:
+        u = r.get("image") or ""
+        w, h = r.get("width") or 0, r.get("height") or 0
+        if not u or _bad_ext(u):
+            continue
+        if w and h and (max(w, h) < 800 or min(w, h) < 450):
+            continue
+        title = ((r.get("title") or "") + " " + u).lower()
+        if need_words and not any(x in title for x in need_words):
+            continue
+        out.append({"url": u, "id": f"ddg{abs(hash(u))}", "text": title,
+                    "credit": f"फ़ोटो: {_domain(r.get('url') or u)}", "headers": BROWSER_UA})
+    return out
+
+
+def bing_images(q, need_words=None):
+    """Bing इमेज सर्च का पेज पढ़कर बड़ी फ़ोटो निकालता है (बिना key)"""
+    try:
+        r = requests.get("https://www.bing.com/images/search",
+                         params={"q": q, "form": "HDRSC2", "first": 1,
+                                 "qft": "+filterui:imagesize-large"},
+                         headers={**BROWSER_UA, "Accept-Language": "en-IN,en;q=0.9"}, timeout=30)
+    except Exception as e:
+        log(f"    [warn] Bing ({q}): {str(e)[:80]}")
+        return []
+    if r.status_code != 200:
+        log(f"    [warn] Bing ({q}): {r.status_code}")
+        return []
+    out = []
+    for m in re.findall(r'class="iusc"[^>]*?\sm="([^"]+)"', r.text):
+        try:
+            d = json.loads(html.unescape(m))
+        except Exception:
+            continue
+        u = d.get("murl") or ""
+        if not u or _bad_ext(u):
+            continue
+        title = (re.sub(r"[\ue000\ue001]", "", d.get("t") or "") + " " + u).lower()
+        if need_words and not any(x in title for x in need_words):
+            continue
+        out.append({"url": u, "id": f"bing{abs(hash(u))}", "text": title,
+                    "credit": f"फ़ोटो: {_domain(d.get('purl') or u)}", "headers": BROWSER_UA})
+    return out
+
+
+def web_images(q, need_words=None):
+    """वेब से फ़ोटो: DuckDuckGo + Bing दोनों (ImageSearchMan जैसा)"""
+    a = ddg_images(q, need_words)
+    b = bing_images(q, need_words)
+    log(f"    वेब सर्च '{q}': DuckDuckGo {len(a)}, Bing {len(b)} फ़ोटो")
+    mixed = []
+    for x, y in zip(a, b):
+        mixed += [y, x]
+    mixed += a[len(b):] + b[len(a):]
+    return mixed
+
+
+def _try_web(names, queries, anchors, work, i, used, orient):
+    plans = []
+    for name in names[:2]:
+        name = (name or "").strip()
+        if name:
+            words = [w for w in re.findall(r"[a-z]+", name.lower()) if len(w) > 2]
+            plans.append((f"{name} {anchors[0]}" if anchors else name, words))
+            plans.append((name, words))
+    for q in queries[:2]:
+        plans.append((q, [a.lower() for a in anchors]))
+    for q, words in plans:
+        dl_fail = bad = 0
+        for c in web_images(q, words)[:20]:
+            if c["id"] in used:
+                continue
+            path = work / f"media_{i:02d}.jpg"
+            if not _download(c["url"], path, max_mb=25, headers=c.get("headers")):
+                dl_fail += 1
+                continue
+            if not _image_ok(path, orient, relaxed=True):
+                bad += 1
+                path.unlink(missing_ok=True)
+                continue
+            used.add(c["id"])
+            log(f"    ✔ वेब सर्च से फ़ोटो मिली ({q}) - {c['credit']}")
+            return {"path": str(path), "kind": "image", "credit": c["credit"]}
+        log(f"    ✘ '{q}': डाउनलोड फेल {dl_fail}, फ़ोटो ख़राब/छोटी {bad}")
+    return None
+
+
+def openverse_images(q, orient):
+    """Openverse: बिना key, खुले (CC) लाइसेंस की फ़ोटो - Pixabay/Pexels key न हो तब भी चलती है"""
+    d = _get_json("https://api.openverse.org/v1/images/",
+                  {"q": q[:100], "page_size": 20, "mature": "false",
+                   "aspect_ratio": "tall" if orient == "portrait" else "wide"},
+                  {"User-Agent": UA["User-Agent"]})
+    out = []
+    for r in (d or {}).get("results", []):
+        u = r.get("url") or ""
+        w, h = r.get("width") or 0, r.get("height") or 0
+        if not u or _bad_ext(u) or (w and h and (max(w, h) < 1000 or min(w, h) < 600)):
+            continue
+        tags = " ".join(t.get("name", "") for t in (r.get("tags") or []))
+        lic = f"CC {r.get('license', '')} {r.get('license_version', '')}".strip()
+        out.append({"url": u, "id": f"ov{r.get('id')}", "text": f"{r.get('title', '')} {tags}".lower(),
+                    "credit": f"फ़ोटो: {(r.get('creator') or '')[:40]} / {r.get('source', 'Openverse')} ({lic})"})
+    return out
+
+
+def diagnose():
+    """रन की शुरुआत में बताता है कि कौन-कौन से स्रोत चालू हैं (लॉग में पहली लाइनें देखो)"""
+    lines = [f"🔎 PIXABAY key: {'हाँ' if _key('PIXABAY_API_KEY') else 'नहीं'} | "
+             f"PEXELS key: {'हाँ' if _key('PEXELS_API_KEY') else 'नहीं'}"]
+    try:
+        import ddgs  # noqa: F401
+        lines.append("🔎 ddgs लाइब्रेरी: हाँ")
+    except ImportError:
+        try:
+            import duckduckgo_search  # noqa: F401
+            lines.append("🔎 ddgs लाइब्रेरी: पुरानी duckduckgo_search है")
+        except ImportError:
+            lines.append("🔎 ddgs लाइब्रेरी: नहीं (requirements.txt में 'ddgs' जोड़ो)")
+    try:
+        lines.append(f"🔎 टेस्ट सर्च 'cricket stadium': Bing {len(bing_images('cricket stadium'))}, "
+                     f"Openverse {len(openverse_images('cricket stadium', 'landscape'))}, "
+                     f"Wikipedia {len(wiki_images('Virat Kohli'))}")
+    except Exception as e:
+        lines.append(f"🔎 टेस्ट सर्च फेल: {str(e)[:100]}")
+    return lines
+
+
 VIDEO_SOURCES = (pexels_videos, pixabay_videos)
-IMAGE_SOURCES = (pexels_images, pixabay_images)
+IMAGE_SOURCES = (pexels_images, pixabay_images, openverse_images)
 
 
 # ---------------------------------------------------------------- खोज के शब्द
@@ -224,8 +466,17 @@ def _query_variants(queries, anchors, generic):
 
 # ---------------------------------------------------------------- मुख्य
 def pick_media(queries, visual_en, orient, work, i, used, want_video=True,
-               anchors=None, generic=None):
+               anchors=None, generic=None, entities=None, web_search=False):
     work = Path(work)
+    anchors = [a for a in (anchors or []) if a]
+    if entities:                                   # नाम वाली चीज़ हो तो पहले उसकी असली फ़ोटो
+        m = _try_entities(entities, work, i, used, orient)
+        if m:
+            return m
+        if web_search:
+            m = _try_web(entities, queries or [], anchors, work, i, used, orient)
+            if m:
+                return m
     anchors = [a for a in (anchors or []) if a]
     qs = _query_variants(queries, anchors, generic)
     order = ("video", "image") if want_video else ("image", "video")
@@ -256,4 +507,6 @@ def pick_media(queries, visual_en, orient, work, i, used, want_video=True,
                 log(f"    ✔ {'क्लिप' if kind == 'video' else 'फ़ोटो'} मिली ({q}) - {c['credit']}")
                 return {"path": str(path), "kind": kind, "credit": c["credit"]}
         log(f"    {'क्लिप' if kind == 'video' else 'फ़ोटो'} नहीं मिली, दूसरा तरीका")
+    if web_search:                                 # आख़िरी कोशिश: वेब सर्च
+        return _try_web([], qs, anchors, work, i, used, orient)
     return None
