@@ -276,6 +276,7 @@ Rules:
   "narration" (Hindi),
   "caption" (Hindi, max 6 words, shown on screen),
   "image_queries" (2-3 English search phrases for STOCK footage/photos built from CONCRETE, filmable nouns: real places, crowds, stadium, city, animals, objects, famous landmarks. No abstract words, no person names unless world-famous),
+  "entities" (0-2 exact English names of REAL people, teams, stadiums, films, places or organisations that this scene is about and that have a Wikipedia page, e.g. "Virat Kohli", "Nepal national cricket team", "Narendra Modi Stadium"; empty list if none),
   "visual_en" (one English sentence describing the ideal shot for this scene),
   "prefer_video" (true if motion helps, else false).
 - "title": Hindi, under 70 characters, curiosity-driven but honest.
@@ -286,7 +287,7 @@ Rules:
 
 Return ONLY valid JSON in this shape:
 {{"title":"","description":"","tags":[],"hashtags":[],"thumbnail_text":"",
-"scenes":[{{"narration":"","caption":"","image_queries":["",""],"visual_en":"","prefer_video":false}}]}}"""
+"scenes":[{{"narration":"","caption":"","image_queries":["",""],"entities":[],"visual_en":"","prefer_video":false}}]}}"""
     for attempt in range(3):
         s = gemini_json(prompt, models, max_tokens)
         scenes = [x for x in s.get("scenes", []) if x.get("narration")]
@@ -726,6 +727,8 @@ def main():
                     f"Settings → Secrets में यह नाम बनाओ (या config.json में सही नाम लिखो)")
 
     log(f"▶ चैनल: {ch['name']} | प्रकार: {kind}")
+    for line in IF.diagnose():
+        log(line)
     headlines = fetch_news(ch, recent) if ch.get("use_news", True) else []
     trends = fetch_trends() if ch.get("use_trends", True) else []
     s = make_script(ch, kind, models, recent, headlines, trends)
@@ -736,6 +739,7 @@ def main():
     voice_files, durs = make_voice_files(s["scenes"], ch, cfg, voice, rate, pitch)
     used_ids, credits, scene_files, first_img = set(), [], [], None
     clip_count = 0
+    card_count = 0
     for i, sc in enumerate(s["scenes"]):
         log(f"[सीन {i + 1}/{len(s['scenes'])}] {sc['narration'][:50]}...")
         dur = durs[i]
@@ -745,7 +749,8 @@ def main():
         try:
             media = IF.pick_media(sc.get("image_queries", []), sc.get("visual_en", ""),
                                   orient, WORK, i, used_ids, want_video,
-                                  ch.get("visual_anchor", []), ch.get("generic_queries", []))
+                                  ch.get("visual_anchor", []), ch.get("generic_queries", []),
+                                  sc.get("entities", []), cfg.get("web_images", True))
         except Exception as e:
             log(f"  [warn] फ़ोटो/क्लिप खोजने में दिक्कत: {str(e)[:150]}")
             media = None
@@ -758,6 +763,7 @@ def main():
                 log(f"  [warn] टेक्स्ट कार्ड नहीं बना: {str(e)[:100]}")
                 gradient_image(g, W, H)
             media = {"path": str(g), "kind": "image", "credit": "", "textcard": True}
+            card_count += 1
         else:
             if media["kind"] == "video":
                 clip_count += 1
@@ -788,7 +794,9 @@ def main():
                 gradient_image(g, W, H)
                 scene_files.append(build_scene(i, {"path": str(g), "kind": "image"}, dur, W, H, None))
 
-    log(f"  कुल क्लिप: {clip_count} / सीन: {len(s['scenes'])}")
+    log(f"  कुल क्लिप: {clip_count} / सीन: {len(s['scenes'])} | टेक्स्ट कार्ड वाले सीन: {card_count}")
+    if card_count > len(s["scenes"]) // 2:
+        log("⚠ आधे से ज़्यादा सीन में फ़ोटो/क्लिप नहीं मिली: ऊपर की 🔎 लाइनें देखो, कोई स्रोत बंद है")
     stamp = datetime.utcnow().strftime("%Y%m%d_%H%M")
     final = OUT / f"{args.channel}_{kind}_{stamp}.mp4"
     silent = WORK / "silent.mp4"
