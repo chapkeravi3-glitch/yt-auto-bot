@@ -21,6 +21,7 @@ config.json में हर चैनल में ये वैकल्पि
 """
 import argparse
 import asyncio
+import base64
 import json
 import math
 import os
@@ -29,6 +30,7 @@ import shutil
 import subprocess
 import sys
 import time
+import wave
 import xml.etree.ElementTree as ET
 from datetime import datetime
 from pathlib import Path
@@ -65,7 +67,7 @@ def fetch_news(ch, recent):
     queries = ch.get("news_queries") or ch.get("themes", [])[:3]
     heads, seen = [], set()
     recent_text = " ".join(recent[-40:])
-    for q in queries[:5]:
+    for q in queries[:6]:
         for when in ("2d", "7d"):
             try:
                 r = requests.get("https://news.google.com/rss/search",
@@ -92,6 +94,36 @@ def fetch_news(ch, recent):
                 break
     log(f"  ताज़ा खबरें मिलीं: {len(heads)}")
     return heads[:18]
+
+
+def fetch_trends():
+    """Google Trends India: आज भारत में सबसे ज़्यादा खोजी जा रही चीज़ें (साथ में उनकी खबर की हेडलाइन)"""
+    out = []
+    for url in ("https://trends.google.com/trending/rss?geo=IN",
+                "https://trends.google.com/trends/trendingsearches/daily/rss?geo=IN"):
+        try:
+            r = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=30)
+            if r.status_code != 200:
+                continue
+            for it in ET.fromstring(r.content).findall(".//item")[:25]:
+                title = (it.findtext("title") or "").strip()
+                traffic, news = "", ""
+                for ch_ in it:
+                    tag = ch_.tag.split("}")[-1]
+                    if tag == "approx_traffic":
+                        traffic = (ch_.text or "").strip()
+                    elif tag == "news_item":
+                        for n in ch_:
+                            if n.tag.split("}")[-1] == "news_item_title" and not news:
+                                news = (n.text or "").strip()
+                if title:
+                    out.append(f"{title} ({traffic}) - {news}" if news else f"{title} ({traffic})")
+            if out:
+                break
+        except Exception as e:
+            log(f"  ट्रेंड्स नहीं मिले: {str(e)[:80]}")
+    log(f"  भारत में ट्रेंडिंग: {len(out)}")
+    return out
 
 
 # ================================================================ Gemini
@@ -189,7 +221,7 @@ def gemini_json(prompt, models, max_tokens):
     raise RuntimeError(f"Gemini से स्क्रिप्ट नहीं मिली ({last})")
 
 
-def make_script(ch, kind, models, recent, headlines):
+def make_script(ch, kind, models, recent, headlines, trends=None):
     if kind == "short":
         length = ("A YouTube Short. 6 to 8 scenes. Total narration 95-115 words "
                   "(about 40-50 seconds when spoken).")
@@ -200,8 +232,15 @@ def make_script(ch, kind, models, recent, headlines):
         max_tokens = 30000
 
     today = datetime.utcnow().strftime("%d %B %Y")
+    trend_txt = ""
+    if trends:
+        trend_txt = ("Trending searches in India RIGHT NOW (with the news behind them):\n"
+                     + "\n".join(f"- {t}" for t in trends)
+                     + "\nIf one of these trending items fits the channel, prefer it above everything else. "
+                       "If none fits, use the headlines below.\n")
+    focus = ch.get("focus_rule", "")
     if headlines:
-        topic_rule = (f"Today is {today}. Here are the LATEST news headlines (Hindi, newest first):\n"
+        topic_rule = (f"Today is {today}. {focus}\n{trend_txt}Here are the LATEST news headlines (Hindi, newest first):\n"
                       + "\n".join(f"- {h}" for h in headlines)
                       + "\nPick ONE of these headlines that suits the channel best and make the video about "
                         "that news. Use ONLY what the headline itself states plus well-established background "
@@ -210,6 +249,11 @@ def make_script(ch, kind, models, recent, headlines):
     else:
         topic_rule = (f"Pick ONE fresh, specific topic from these themes: {', '.join(ch['themes'])}.")
 
+    anchors = ch.get("visual_anchor", [])
+    anchor_rule = (f"- EVERY item in image_queries MUST contain one of these words: {', '.join(anchors)}. "
+                   f"Describe a real filmable stock-footage scene, e.g. '{anchors[0]} stadium crowd', "
+                   f"'{anchors[0]} player celebrating'. Never write queries about buses, laptops, cities, "
+                   f"offices or anything unrelated to {anchors[0]}.\n") if anchors else ""
     prompt = f"""You are the scriptwriter of a Hindi YouTube channel called "{ch['name']}".
 Channel niche: {ch['niche']}
 {topic_rule}
@@ -226,7 +270,7 @@ NARRATION STYLE (very important, it will be read by a text-to-speech voice):
 
 Rules:
 - Use only true, verifiable facts. If unsure, leave it out.
-- Scene 1 must be a strong hook (surprising question or fact).
+{anchor_rule}- Scene 1 must be a strong hook (surprising question or fact).
 - The last scene: one short line asking viewers to subscribe.
 - For each scene give:
   "narration" (Hindi),
@@ -268,6 +312,81 @@ def tts(text, voice, path, rate="+6%", pitch="+0Hz"):
             log(f"  आवाज़ बनाने में दिक्कत ({str(e)[:80]}), दोबारा")
         time.sleep(3 * (a + 1))
     raise RuntimeError("आवाज़ नहीं बनी")
+
+
+def tts_gemini(text, voice_name, model, path):
+    """Gemini की इंसान जैसी आवाज़ (उसी GEMINI_API_KEY से)। सफल हो तो True"""
+    key = os.environ["GEMINI_API_KEY"].strip()
+    prompt = ("Read the following in natural, warm, conversational Hindi, like a friendly human "
+              "storyteller. Smooth flow, natural short pauses, never robotic:\n\n" + text)
+    body = {"contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {"responseModalities": ["AUDIO"],
+                                 "speechConfig": {"voiceConfig": {
+                                     "prebuiltVoiceConfig": {"voiceName": voice_name}}}}}
+    for attempt in range(4):
+        try:
+            r = requests.post(
+                f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+                params={"key": key}, json=body, timeout=180)
+        except Exception as e:
+            log(f"  Gemini आवाज़: नेटवर्क दिक्कत {str(e)[:80]}")
+            time.sleep(10)
+            continue
+        if r.status_code in (429, 500, 502, 503, 504):
+            wait = min(20 * (attempt + 1), 90)
+            log(f"  Gemini आवाज़ {r.status_code}, {wait} सेकंड रुककर दोबारा")
+            time.sleep(wait)
+            continue
+        if r.status_code != 200:
+            log(f"  Gemini आवाज़ {r.status_code}: {r.text[:200]}")
+            return False
+        try:
+            parts = r.json()["candidates"][0]["content"]["parts"]
+            b64 = next(p["inlineData"]["data"] for p in parts if "inlineData" in p)
+            with wave.open(str(path), "wb") as w:
+                w.setnchannels(1)
+                w.setsampwidth(2)
+                w.setframerate(24000)
+                w.writeframes(base64.b64decode(b64))
+            if Path(path).stat().st_size > 5000:
+                return True
+        except Exception as e:
+            log(f"  Gemini आवाज़ में ऑडियो नहीं आया ({str(e)[:80]}), दोबारा")
+            time.sleep(5)
+    return False
+
+
+def make_voice_files(scenes, ch, cfg, edge_voice, rate, pitch):
+    """सारे सीन की आवाज़ पहले बनाता है। पूरी वीडियो में एक ही आवाज़ रहे, इसलिए
+    Gemini किसी एक सीन पर भी फेल हो तो पूरी वीडियो edge-tts में दोबारा बनती है"""
+    engine = ch.get("tts_engine", cfg.get("tts_engine", "gemini"))
+    files, durs = [], []
+    if engine == "gemini":
+        model = ch.get("tts_model", cfg.get("tts_model", "gemini-2.5-flash-preview-tts"))
+        vname = ch.get("gemini_voice", "Charon")
+        ok = True
+        for i, sc in enumerate(scenes):
+            log(f"  आवाज़ {i + 1}/{len(scenes)} (Gemini {vname})")
+            raw = WORK / f"g_{i:02d}.wav"
+            if not tts_gemini(sc["narration"], vname, model, raw):
+                ok = False
+                break
+            wav = WORK / f"a_{i:02d}.wav"
+            durs.append(prepare_voice(raw, wav))
+            files.append(wav)
+            time.sleep(4)
+        if ok:
+            log("🎙 Gemini की आवाज़ इस्तेमाल हुई")
+            return files, durs
+        log("  Gemini आवाज़ नहीं चली; एक जैसी आवाज़ के लिए पूरी वीडियो edge-tts में बनेगी")
+        files, durs = [], []
+    for i, sc in enumerate(scenes):
+        mp3 = WORK / f"a_{i:02d}.mp3"
+        wav = WORK / f"a_{i:02d}.wav"
+        tts(sc["narration"], edge_voice, mp3, rate, pitch)
+        durs.append(prepare_voice(mp3, wav))
+        files.append(wav)
+    return files, durs
 
 
 def check_voice(voice, want="Male"):
@@ -385,20 +504,77 @@ def gradient_image(path, W, H):
     im.save(path, quality=92)
 
 
-def make_thumbnail(img_path, text, out):
-    im = cover(Image.open(img_path).convert("RGB"), 1280, 720)
-    im = ImageEnhance.Brightness(im).enhance(0.6)
+PALETTES = [((15, 32, 80), (120, 40, 140)), ((10, 60, 70), (20, 20, 60)),
+            ((90, 20, 30), (25, 25, 70)), ((20, 70, 40), (10, 30, 60)),
+            ((70, 40, 10), (60, 15, 60))]
+
+
+def make_text_card(text, W, H, path, seed=0):
+    """फ़ोटो/क्लिप न मिलने पर: रंगीन बैकग्राउंड पर बड़े अक्षरों में कैप्शन।
+    यह फ़ोटो की तरह चलता है, इसलिए build_scene में अपने-आप ज़ूम-इन/ज़ूम-आउट हो जाता है"""
+    if not CAPTIONS_OK or not text:
+        gradient_image(path, W, H)
+        return
+    c1, c2 = PALETTES[seed % len(PALETTES)]
+    im = Image.new("RGB", (W, H))
     d = ImageDraw.Draw(im)
-    if CAPTIONS_OK:
-        font = ImageFont.truetype(FONT, 120, layout_engine=ImageFont.Layout.RAQM)
-        lines = wrap(d, text, font, 1100)[:3]
-        y = (720 - 150 * len(lines)) // 2
+    for y in range(H):
+        t = y / H
+        d.line([(0, y), (W, y)], fill=tuple(int(c1[k] + (c2[k] - c1[k]) * t) for k in range(3)))
+    size = int(W * 0.13) if H > W else int(H * 0.14)
+    while True:
+        font = ImageFont.truetype(FONT, size, layout_engine=ImageFont.Layout.RAQM)
+        lines = wrap(d, text, font, W * 0.84)
+        lh = int(size * 1.4)
+        if (len(lines) <= 4 and lh * len(lines) < H * 0.6) or size < 40:
+            break
+        size = int(size * 0.9)
+    lines = lines[:5]
+    y = (H - lh * len(lines)) // 2
+    bar_w = int(W * 0.25)
+    d.rectangle([(W - bar_w) // 2, y - 40, (W + bar_w) // 2, y - 28], fill=(255, 235, 59))
+    for ln in lines:
+        w = d.textlength(ln, font=font)
+        d.text(((W - w) / 2, y), ln, font=font, fill=(255, 255, 255),
+               stroke_width=4, stroke_fill=(0, 0, 0))
+        y += lh
+    im.save(path, quality=94)
+
+
+def make_thumbnail(img_path, text, out):
+    """1280x720 थंबनेल: चमकदार फ़ोटो, नीचे गहरा ग्रेडिएंट, बड़े पीले अक्षर। 2MB से छोटा रखता है"""
+    im = cover(Image.open(img_path).convert("RGB"), 1280, 720)
+    im = ImageEnhance.Contrast(im).enhance(1.12)
+    im = ImageEnhance.Color(im).enhance(1.2)
+    im = ImageEnhance.Brightness(im).enhance(0.85)
+    shade = Image.new("RGBA", (1280, 720), (0, 0, 0, 0))
+    sd = ImageDraw.Draw(shade)
+    for y in range(720):
+        a = int(max(0, (y - 220) / 500) * 200)
+        sd.line([(0, y), (1280, y)], fill=(0, 0, 0, a))
+    im = Image.alpha_composite(im.convert("RGBA"), shade).convert("RGB")
+    d = ImageDraw.Draw(im)
+    if CAPTIONS_OK and text:
+        size = 130
+        while True:
+            font = ImageFont.truetype(FONT, size, layout_engine=ImageFont.Layout.RAQM)
+            lines = wrap(d, text, font, 1160)
+            if len(lines) <= 2 or size < 60:
+                break
+            size -= 10
+        lines = lines[:2]
+        lh = int(size * 1.3)
+        y = 700 - lh * len(lines)
         for ln in lines:
             w = d.textlength(ln, font=font)
             d.text(((1280 - w) / 2, y), ln, font=font, fill=(255, 235, 59),
-                   stroke_width=6, stroke_fill=(0, 0, 0))
-            y += 150
-    im.save(out, quality=88)
+                   stroke_width=7, stroke_fill=(0, 0, 0))
+            y += lh
+    d.rectangle([0, 0, 1279, 719], outline=(255, 235, 59), width=8)
+    for q in (90, 80, 70, 60):
+        im.save(out, quality=q)
+        if Path(out).stat().st_size < 1_900_000:
+            break
 
 
 def grab_frame(video, out):
@@ -514,7 +690,9 @@ def upload(ch, video, thumb, s, kind, credits):
             yt.thumbnails().set(videoId=vid, media_body=MediaFileUpload(str(thumb))).execute()
             log("   थंबनेल लग गया")
         except Exception as e:
-            log(f"   [warn] थंबनेल नहीं लगा (चैनल वेरिफाइड न हो तो ऐसा होता है): {str(e)[:120]}")
+            log(f"   [warn] थंबनेल यूट्यूब ने नहीं लिया: {str(e)[:300]}")
+            log("   → अगर 'custom thumbnail' या forbidden दिखे: यूट्यूब चैनल को फ़ोन नंबर से वेरिफाई करो "
+                "(youtube.com/verify), तभी API से थंबनेल लगता है")
     return vid
 
 
@@ -549,34 +727,37 @@ def main():
 
     log(f"▶ चैनल: {ch['name']} | प्रकार: {kind}")
     headlines = fetch_news(ch, recent) if ch.get("use_news", True) else []
-    s = make_script(ch, kind, models, recent, headlines)
+    trends = fetch_trends() if ch.get("use_trends", True) else []
+    s = make_script(ch, kind, models, recent, headlines, trends)
     log(f"  टॉपिक: {s['title']} | सीन: {len(s['scenes'])}")
 
     voice = check_voice(ch.get("voice", "hi-IN-MadhurNeural"), ch.get("gender", "Male"))
     rate, pitch = ch.get("voice_rate", "+6%"), ch.get("voice_pitch", "+0Hz")
-    used_ids, credits, scene_files, voice_files, first_img = set(), [], [], [], None
+    voice_files, durs = make_voice_files(s["scenes"], ch, cfg, voice, rate, pitch)
+    used_ids, credits, scene_files, first_img = set(), [], [], None
     clip_count = 0
     for i, sc in enumerate(s["scenes"]):
         log(f"[सीन {i + 1}/{len(s['scenes'])}] {sc['narration'][:50]}...")
-        mp3 = WORK / f"a_{i:02d}.mp3"
-        wav = WORK / f"a_{i:02d}.wav"
-        tts(sc["narration"], voice, mp3, rate, pitch)
-        dur = prepare_voice(mp3, wav)
-        voice_files.append(wav)
+        dur = durs[i]
 
         # हर तीन में से दो सीन में वीडियो क्लिप की कोशिश
         want_video = bool(sc.get("prefer_video")) or (i % 3 != 2)
         try:
             media = IF.pick_media(sc.get("image_queries", []), sc.get("visual_en", ""),
-                                  orient, WORK, i, used_ids, want_video)
+                                  orient, WORK, i, used_ids, want_video,
+                                  ch.get("visual_anchor", []), ch.get("generic_queries", []))
         except Exception as e:
             log(f"  [warn] फ़ोटो/क्लिप खोजने में दिक्कत: {str(e)[:150]}")
             media = None
         if not media:
-            log("  कुछ नहीं मिला, सादा बैकग्राउंड लगा रहे हैं")
-            g = WORK / f"grad_{i:02d}.jpg"
-            gradient_image(g, W, H)
-            media = {"path": str(g), "kind": "image", "credit": ""}
+            log("  कुछ नहीं मिला, बड़े अक्षरों वाला ज़ूम टेक्स्ट कार्ड लगा रहे हैं")
+            g = WORK / f"card_{i:02d}.jpg"
+            try:
+                make_text_card(sc.get("caption") or sc["narration"][:40], W, H, g, i)
+            except Exception as e:
+                log(f"  [warn] टेक्स्ट कार्ड नहीं बना: {str(e)[:100]}")
+                gradient_image(g, W, H)
+            media = {"path": str(g), "kind": "image", "credit": "", "textcard": True}
         else:
             if media["kind"] == "video":
                 clip_count += 1
@@ -588,7 +769,7 @@ def main():
             first_img = grab_frame(media["path"], WORK / f"frame_{i:02d}.jpg")
 
         cap_png = None
-        if CAPTIONS_OK and sc.get("caption"):
+        if CAPTIONS_OK and sc.get("caption") and not media.get("textcard"):
             cap_png = WORK / f"cap_{i:02d}.png"
             try:
                 make_caption_png(sc["caption"], W, H, cap_png)
@@ -618,10 +799,16 @@ def main():
     log(f"🎬 वीडियो तैयार: {final.name} ({duration(final):.0f} सेकंड)")
 
     thumb = None
-    if kind == "long" and first_img:
+    if kind == "long":
         thumb = OUT / f"{args.channel}_{kind}_{stamp}.jpg"
+        ttext = s.get("thumbnail_text") or s["title"][:20]
         try:
-            make_thumbnail(first_img, s.get("thumbnail_text") or s["title"][:20], thumb)
+            if not first_img:                       # कोई फ़ोटो/फ़्रेम नहीं मिला तो रंगीन कार्ड
+                first_img = str(WORK / "thumb_bg.jpg")
+                make_text_card(ttext, 1280, 720, first_img, 1)
+                ttext = ""
+            make_thumbnail(first_img, ttext, thumb)
+            log(f"🖼 थंबनेल बन गया: {thumb.name} ({thumb.stat().st_size // 1024} KB)")
         except Exception as e:
             log(f"  [warn] थंबनेल नहीं बना: {e}")
             thumb = None
