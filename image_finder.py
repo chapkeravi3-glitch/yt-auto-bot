@@ -473,7 +473,9 @@ def diagnose(library_root=None):
 # ---------------------------------------------------------------- अपनी फ़ोटो लाइब्रेरी (repo के photos/ फ़ोल्डर में)
 # बनावट:  photos/<category>/<नाम-वाला-फ़ोल्डर>/फ़ोटो.jpg   जैसे photos/cricket/virat-kohli/..., photos/cricket/india-team/...
 # photos/<category>/general/ में किसी भी टॉपिक की आम फ़ोटो रखो: कोई नाम न मिले तो उसी से उठेंगी
-LIB_EXT = (".jpg", ".jpeg", ".png", ".webp")
+LIB_IMG = (".jpg", ".jpeg", ".png", ".webp")
+LIB_VID = (".mp4", ".mov", ".webm", ".mkv", ".m4v")
+LIB_EXT = LIB_IMG + LIB_VID
 LIB_STOP = {"the", "and", "for", "with"}
 # ये आम शब्द फ़ोल्डर के नाम में हों तो मैचिंग में नहीं गिने जाते (जैसे india-team में सिर्फ़ 'india' गिना जाएगा)
 LIB_GENERIC = {"team", "cricket", "national", "match", "matches", "player", "players", "film", "movie",
@@ -488,29 +490,50 @@ def library_stats(root):
     root = Path(root) if root else None
     if not root or not root.is_dir():
         return "फ़ोल्डर photos/ अभी नहीं है"
-    n = sum(1 for p in root.rglob("*") if p.suffix.lower() in LIB_EXT)
+    n = sum(1 for p in root.rglob("*") if p.suffix.lower() in LIB_IMG)
+    v = sum(1 for p in root.rglob("*") if p.suffix.lower() in LIB_VID)
     cats = sorted(d.name for d in root.iterdir() if d.is_dir())
-    return f"{n} फ़ोटो, फ़ोल्डर: {', '.join(cats) if cats else '-'}"
+    return f"{n} फ़ोटो, {v} वीडियो क्लिप, फ़ोल्डर: {', '.join(cats) if cats else '-'}"
 
 
-def _lib_pick_file(files, used):
-    random.shuffle(files)
-    for f in files:
-        if str(f) in used:
-            continue
-        try:
-            with Image.open(f) as im:
-                im.verify()
-            with Image.open(f) as im:
-                if min(im.size) < 400:
-                    continue
-        except Exception:
-            continue
-        return f
-    return None
+def _lib_video_ok(path):
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+             "stream=width,height", "-of", "csv=p=0", str(path)],
+            capture_output=True, text=True, timeout=30).stdout.strip()
+        w, h = [int(x) for x in out.split(",")[:2]]
+        return max(w, h) >= 640
+    except Exception:
+        return False
 
 
-def _try_library(root, category, entities, queries, used):
+def _lib_pick_file(files, used, want_video=False):
+    """(फ़ाइल, 'image' या 'video') लौटाता है। want_video हो तो पहले क्लिप, वरना पहले फ़ोटो"""
+    vids = [x for x in files if x.suffix.lower() in LIB_VID and str(x) not in used]
+    imgs = [x for x in files if x.suffix.lower() in LIB_IMG and str(x) not in used]
+    random.shuffle(vids)
+    random.shuffle(imgs)
+    order = [("video", vids), ("image", imgs)] if want_video else [("image", imgs), ("video", vids)]
+    for kind, lst in order:
+        for f in lst:
+            if kind == "video":
+                if _lib_video_ok(f):
+                    return f, kind
+                continue
+            try:
+                with Image.open(f) as im:
+                    im.verify()
+                with Image.open(f) as im:
+                    if min(im.size) < 400:
+                        continue
+            except Exception:
+                continue
+            return f, kind
+    return None, None
+
+
+def _try_library(root, category, entities, queries, used, want_video=False):
     base = Path(root) / category
     if not base.is_dir():
         return None
@@ -533,18 +556,18 @@ def _try_library(root, category, entities, queries, used):
                 cands.append((len(hit) / len(ft), len(hit), d, files))
     cands.sort(key=lambda x: (x[0], x[1]), reverse=True)
     for _, _, d, files in cands:                       # सबसे सटीक फ़ोल्डर पहले
-        f = _lib_pick_file(files, used)
+        f, kind = _lib_pick_file(files, used, want_video)
         if f:
             used.add(str(f))
-            log(f"    ✔ अपनी लाइब्रेरी से फ़ोटो ({d.name})")
-            return {"path": str(f), "kind": "image", "credit": "", "library": True}
+            log(f"    ✔ अपनी लाइब्रेरी से {'क्लिप' if kind == 'video' else 'फ़ोटो'} ({d.name})")
+            return {"path": str(f), "kind": kind, "credit": "", "library": True}
     gen = base / "general"
     if gen.is_dir():
-        f = _lib_pick_file([x for x in gen.iterdir() if x.suffix.lower() in LIB_EXT], used)
+        f, kind = _lib_pick_file([x for x in gen.iterdir() if x.suffix.lower() in LIB_EXT], used, want_video)
         if f:
             used.add(str(f))
-            log("    ✔ अपनी लाइब्रेरी से आम फ़ोटो (general)")
-            return {"path": str(f), "kind": "image", "credit": "", "library": True}
+            log(f"    ✔ अपनी लाइब्रेरी से आम {'क्लिप' if kind == 'video' else 'फ़ोटो'} (general)")
+            return {"path": str(f), "kind": kind, "credit": "", "library": True}
     return None
 
 
@@ -585,7 +608,7 @@ def pick_media(queries, visual_en, orient, work, i, used, want_video=True,
     work = Path(work)
     anchors = [a for a in (anchors or []) if a]
     if library and category:                       # सबसे पहले अपनी लाइब्रेरी की फ़ोटो
-        m = _try_library(library, category, entities, queries, used)
+        m = _try_library(library, category, entities, queries, used, want_video)
         if m:
             return m
     if entities:                                   # नाम वाली चीज़ हो तो पहले उसकी असली फ़ोटो
