@@ -17,6 +17,7 @@ import random
 import re
 import subprocess
 import time
+from difflib import SequenceMatcher
 from pathlib import Path
 
 import requests
@@ -533,29 +534,56 @@ def _lib_pick_file(files, used, want_video=False):
     return None, None
 
 
+def _same(a, b):
+    """दो शब्द लगभग एक जैसे हों (india/indian, shubam/shubman)"""
+    if a == b:
+        return True
+    if len(a) >= 5 and len(b) >= 5:
+        return (a.startswith(b) or b.startswith(a) or SequenceMatcher(None, a, b).ratio() >= 0.78
+                or (a[:4] == b[:4] and abs(len(a) - len(b)) <= 2))
+    return False
+
+
+def _name_tokens(s):
+    return [w for w in re.findall(r"[a-z0-9]+", (s or "").lower().replace("_", " "))
+            if len(w) > 2 and w not in LIB_STOP and w not in LIB_GENERIC]
+
+
 def _try_library(root, category, entities, queries, used, want_video=False):
     base = Path(root) / category
     if not base.is_dir():
         return None
     qtok = set()
     for s in list(entities or []) + list(queries or []):
-        qtok |= _tok(s)
+        qtok |= set(_name_tokens(s))
+    ents = [_name_tokens(e) for e in (entities or [])]
+    ents = [e for e in ents if e]
     cands = []
     for d in sorted(p for p in base.iterdir() if p.is_dir()):
         if d.name.lower() in ("general", "misc", "common"):
             continue
-        order = [w for w in re.findall(r"[a-z0-9]+", d.name.lower().replace("_", " "))
-                 if len(w) > 2 and w not in LIB_STOP and w not in LIB_GENERIC]
-        ft = set(order)
-        hit = ft & qtok
-        # फ़ोल्डर के लगभग सारे ख़ास शब्द मिलें, या नाम का आख़िरी शब्द (surname) मिले
-        if ft and hit and (len(hit) / len(ft) >= 0.75 or
-                           (len(order) >= 2 and order[-1] in hit and len(order[-1]) >= 5)):
+        order = _name_tokens(d.name.replace("-", " "))
+        if not order:
+            continue
+        best = 0.0
+        # 1) नाम (entity) के सारे शब्द फ़ोल्डर के नाम में मिलें (फ़ोल्डर का नाम लंबा हो तब भी चलेगा)
+        for e in ents:
+            found = [t for t in e if any(_same(t, x) for x in order)]
+            if len(found) == len(e) and any(len(t) >= 4 for t in found):
+                best = max(best, 1.0 + len(found) / len(order))
+        # 2) फ़ोल्डर के लगभग सारे शब्द सीन के शब्दों में मिलें
+        hit = [x for x in order if any(_same(x, t) for t in qtok)]
+        if hit and (len(hit) / len(order) >= 0.75 or
+                    (len(order) >= 2 and order[-1] in hit and len(order[-1]) >= 5)):
+            best = max(best, len(hit) / len(order))
+        if best > 0:
             files = [x for x in d.iterdir() if x.suffix.lower() in LIB_EXT]
             if files:
-                cands.append((len(hit) / len(ft), len(hit), d, files))
-    cands.sort(key=lambda x: (x[0], x[1]), reverse=True)
-    for _, _, d, files in cands:                       # सबसे सटीक फ़ोल्डर पहले
+                cands.append((best, d, files))
+    cands.sort(key=lambda x: x[0], reverse=True)
+    random.shuffle(cands)                               # बराबर नंबर वालों में बारी-बारी
+    cands.sort(key=lambda x: round(x[0], 2), reverse=True)
+    for _, d, files in cands:                           # सबसे सटीक फ़ोल्डर पहले
         f, kind = _lib_pick_file(files, used, want_video)
         if f:
             used.add(str(f))
