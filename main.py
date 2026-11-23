@@ -284,9 +284,10 @@ Rules:
 - "tags": 8-12 tags mixing Hindi and English.
 - "hashtags": 4-5 hashtags like "#Facts".
 - "thumbnail_text": 2-4 Hindi words, punchy.
+- "match_format": the cricket format this video is about: "test", "odi", "t20" or "none". "gender": "women" if the video is about women's cricket, otherwise "men". For women's cricket always write "women's" inside entity names, e.g. "India women's national cricket team". Name a player in "entities" ONLY if the narration of that scene really talks about that player.
 
 Return ONLY valid JSON in this shape:
-{{"title":"","description":"","tags":[],"hashtags":[],"thumbnail_text":"",
+{{"title":"","description":"","tags":[],"hashtags":[],"thumbnail_text":"","match_format":"","gender":"",
 "scenes":[{{"narration":"","caption":"","image_queries":["",""],"entities":[],"visual_en":"","prefer_video":false}}]}}"""
     for attempt in range(3):
         s = gemini_json(prompt, models, max_tokens)
@@ -296,6 +297,31 @@ Return ONLY valid JSON in this shape:
             return s
         log("  स्क्रिप्ट अधूरी आई, दोबारा माँग रहे हैं")
     raise RuntimeError("स्क्रिप्ट ठीक से नहीं बनी")
+
+
+# ================================================================ संदर्भ: टेस्ट/वनडे/T20 और महिला/पुरुष
+def detect_context(s):
+    """वीडियो किस फ़ॉर्मेट और किस वर्ग (महिला/पुरुष) का है, ताकि सही फ़ोटो चुनी जाएँ"""
+    text = " ".join([s.get("title", ""), s.get("description", "")]
+                    + [sc.get("narration", "") for sc in s.get("scenes", [])]).lower()
+    fm = str(s.get("match_format", "")).lower().strip()
+    fm = {"t20i": "t20", "ipl": "t20", "one day": "odi", "oneday": "odi"}.get(fm, fm)
+    if fm not in ("test", "odi", "t20"):
+        found = set()
+        if re.search(r"टेस्ट|\btest\b", text):
+            found.add("test")
+        if re.search(r"वनडे|एकदिवसीय|\bodi\b|one.?day", text):
+            found.add("odi")
+        if re.search(r"टी-?20|\bt20|\bipl\b|आईपीएल", text):
+            found.add("t20")
+        fm = found.pop() if len(found) == 1 else None
+    gd = str(s.get("gender", "")).lower().strip()
+    if gd not in ("women", "men"):
+        gd = None
+    if gd != "women" and re.search(r"महिला|\bwomen|female|harmanpreet|हरमनप्रीत|smriti|स्मृति|mandhana|मंधाना|\bwpl\b|shafali|jemimah",
+                                   text):
+        gd = "women"
+    return {"format": fm, "gender": gd or "men"}
 
 
 # ================================================================ आवाज़
@@ -734,6 +760,9 @@ def main():
     s = make_script(ch, kind, models, recent, headlines, trends)
     log(f"  टॉपिक: {s['title']} | सीन: {len(s['scenes'])}")
 
+    ctx = detect_context(s) if ch.get("use_context") else {}
+    if ctx:
+        log(f"  संदर्भ: फ़ॉर्मेट={ctx['format'] or 'तय नहीं'}, वर्ग={ctx['gender']}")
     voice = check_voice(ch.get("voice", "hi-IN-MadhurNeural"), ch.get("gender", "Male"))
     rate, pitch = ch.get("voice_rate", "+6%"), ch.get("voice_pitch", "+0Hz")
     voice_files, durs = make_voice_files(s["scenes"], ch, cfg, voice, rate, pitch)
@@ -751,7 +780,12 @@ def main():
                                   orient, WORK, i, used_ids, want_video,
                                   ch.get("visual_anchor", []), ch.get("generic_queries", []),
                                   sc.get("entities", []), cfg.get("web_images", True),
-                                  str(ROOT / "photos"), ch.get("library_category", args.channel))
+                                  str(ROOT / "photos"), ch.get("library_category", args.channel),
+                                  ctx, cfg.get("library_block", []), cfg.get("library_tags", {}),
+                                  {"enabled": cfg.get("ai_photo_director", True), "models": models,
+                                   "ctx": ctx, "channel": ch["name"], "title": s["title"],
+                                   "entities": sc.get("entities", []),
+                                   "scene": f"{sc['narration']} | visual: {sc.get('visual_en', '')}"})
         except Exception as e:
             log(f"  [warn] फ़ोटो/क्लिप खोजने में दिक्कत: {str(e)[:150]}")
             media = None
