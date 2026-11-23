@@ -141,10 +141,24 @@
       "use_trends": true,
       "focus_rule": "FOCUS: whatever is trending in cricket TODAY (India matches, IPL, records, player news). Prefer news over old history.",
       "gemini_voice": "Orus",
-      "library_category": "cricket"
+      "library_category": "cricket",
+      "use_context": true
     }
   },
   "tts_engine": "gemini",
   "tts_model": "gemini-2.5-flash-preview-tts",
-  "web_images": true
+  "web_images": true,
+  "library_tags": {
+    "shubam-gill-in-onday-mach": [
+      "odi"
+    ],
+    "shubam-gill-in-test-mach": [
+      "test"
+    ],
+    "indian-cricket-team-is-taste-mach": [
+      "test"
+    ]
+  },
+  "library_block": [],
+  "ai_photo_director": true
 }
