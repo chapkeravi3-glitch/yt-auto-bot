@@ -10,7 +10,9 @@ v2 में बदलाव:
 
 स्रोत: Pexels वीडियो/फ़ोटो (अगर PEXELS_API_KEY हो), Pixabay वीडियो/फ़ोटो (PIXABAY_API_KEY)
 """
+import base64
 import html
+import io
 import json
 import os
 import random
@@ -397,12 +399,18 @@ def web_images(q, need_words=None):
     return mixed
 
 
-def _try_web(names, queries, anchors, work, i, used, orient):
+def _try_web(names, queries, anchors, work, i, used, orient, ctx=None):
     plans = []
+    fm = (ctx or {}).get("format")
+    women = (ctx or {}).get("gender") == "women"
     for name in names[:2]:
         name = (name or "").strip()
         if name:
             words = [w for w in re.findall(r"[a-z]+", name.lower()) if len(w) > 2]
+            if fm in ("test", "odi", "t20"):
+                plans.append((f"{name} {fm}", words))
+            if women and "women" not in name.lower():
+                plans.append((f"{name} women", words))
             plans.append((f"{name} {anchors[0]}" if anchors else name, words))
             plans.append((name, words))
     for q in queries[:2]:
@@ -480,7 +488,42 @@ LIB_EXT = LIB_IMG + LIB_VID
 LIB_STOP = {"the", "and", "for", "with"}
 # ये आम शब्द फ़ोल्डर के नाम में हों तो मैचिंग में नहीं गिने जाते (जैसे india-team में सिर्फ़ 'india' गिना जाएगा)
 LIB_GENERIC = {"team", "cricket", "national", "match", "matches", "player", "players", "film", "movie",
-               "movies", "photo", "photos", "stadium", "world", "cup", "new"}
+               "movies", "photo", "photos", "stadium", "world", "cup", "new",
+               "women", "womens", "woman", "ladies", "female", "mahila", "wpl",
+               "test", "tests", "odi", "t20", "t20i", "oneday"}
+
+# फ़ोल्डर के नाम (या config के library_tags) से पता चलता है कि वह महिला/पुरुष और टेस्ट/वनडे/T20 का है
+WOMEN_W = {"women", "womens", "woman", "ladies", "female", "mahila", "wpl",
+           # महिला खिलाड़ियों के नाम: इनके फ़ोल्डर अपने-आप 'महिला' माने जाएँगे
+           "harmanpreet", "smriti", "mandhana", "jemimah", "shafali", "renuka", "vastrakar",
+           "mithali", "jhulan", "deepti", "richa", "lanning", "sciver", "ellyse", "amelia"}
+FMT_W = {"test": "test", "tests": "test", "odi": "odi", "oneday": "odi", "t20": "t20", "t20i": "t20"}
+
+
+def _folder_flags(name, tags=None):
+    raw = set(re.findall(r"[a-z0-9]+", name.lower()))
+    for t in (tags or {}).get(name, []):
+        raw.add(str(t).lower())
+    women = bool(raw & WOMEN_W)
+    fmts = {FMT_W[w] for w in raw if w in FMT_W}
+    return women, fmts
+
+
+def _guard(name, ctx, block, tags, neutral_ok=False):
+    """(चल सकता है?, नंबर बढ़ाना) लौटाता है। महिला/पुरुष और टेस्ट/वनडे/T20 में गड़बड़ न हो"""
+    low = name.lower()
+    if block and any(str(b).lower() in low for b in block):
+        return False, 0.0
+    women, fmts = _folder_flags(name, tags)
+    g, fm = (ctx or {}).get("gender"), (ctx or {}).get("format")
+    if g == "women" and not women and not (neutral_ok and not fmts):
+        return False, 0.0
+    if g == "men" and women:
+        return False, 0.0
+    if fm and fmts and fm not in fmts:
+        return False, 0.0
+    bonus = (0.5 if (g == "women" and women) else 0.0) + (0.5 if (fm and fm in fmts) else 0.0)
+    return True, bonus
 
 
 def _tok(s):
@@ -549,7 +592,8 @@ def _name_tokens(s):
             if len(w) > 2 and w not in LIB_STOP and w not in LIB_GENERIC]
 
 
-def _try_library(root, category, entities, queries, used, want_video=False):
+def _try_library(root, category, entities, queries, used, want_video=False,
+                 ctx=None, block=None, tags=None, quiet=False):
     base = Path(root) / category
     if not base.is_dir():
         return None
@@ -560,7 +604,10 @@ def _try_library(root, category, entities, queries, used, want_video=False):
     ents = [e for e in ents if e]
     cands = []
     for d in sorted(p for p in base.iterdir() if p.is_dir()):
-        if d.name.lower() in ("general", "misc", "common"):
+        if d.name.lower().startswith(("general", "misc", "common")):
+            continue
+        ok, bonus = _guard(d.name, ctx, block, tags)
+        if not ok:
             continue
         order = _name_tokens(d.name.replace("-", " "))
         if not order:
@@ -579,22 +626,30 @@ def _try_library(root, category, entities, queries, used, want_video=False):
         if best > 0:
             files = [x for x in d.iterdir() if x.suffix.lower() in LIB_EXT]
             if files:
-                cands.append((best, d, files))
-    cands.sort(key=lambda x: x[0], reverse=True)
+                cands.append((best + bonus, d, files))
     random.shuffle(cands)                               # बराबर नंबर वालों में बारी-बारी
     cands.sort(key=lambda x: round(x[0], 2), reverse=True)
     for _, d, files in cands:                           # सबसे सटीक फ़ोल्डर पहले
         f, kind = _lib_pick_file(files, used, want_video)
         if f:
             used.add(str(f))
-            log(f"    ✔ अपनी लाइब्रेरी से {'क्लिप' if kind == 'video' else 'फ़ोटो'} ({d.name})")
+            if not quiet:
+                log(f"    ✔ अपनी लाइब्रेरी से {'क्लिप' if kind == 'video' else 'फ़ोटो'} ({d.name})")
             return {"path": str(f), "kind": kind, "credit": "", "library": True}
-    gen = base / "general"
-    if gen.is_dir():
-        f, kind = _lib_pick_file([x for x in gen.iterdir() if x.suffix.lower() in LIB_EXT], used, want_video)
+    # कोई नाम नहीं मिला: general फ़ोल्डर (general-test, general-women जैसे ख़ास फ़ोल्डर पहले)
+    gens = []
+    for d in sorted(p for p in base.iterdir() if p.is_dir() and p.name.lower().startswith("general")):
+        ok, bonus = _guard(d.name, ctx, block, tags, neutral_ok=True)
+        if ok:
+            women, fmts = _folder_flags(d.name, tags)
+            gens.append((bonus + (0.0 if (women or fmts) else -0.25), d))
+    gens.sort(key=lambda x: x[0], reverse=True)
+    for _, d in gens:
+        f, kind = _lib_pick_file([x for x in d.iterdir() if x.suffix.lower() in LIB_EXT], used, want_video)
         if f:
             used.add(str(f))
-            log(f"    ✔ अपनी लाइब्रेरी से आम {'क्लिप' if kind == 'video' else 'फ़ोटो'} (general)")
+            if not quiet:
+                log(f"    ✔ अपनी लाइब्रेरी से आम {'क्लिप' if kind == 'video' else 'फ़ोटो'} ({d.name})")
             return {"path": str(f), "kind": kind, "credit": "", "library": True}
     return None
 
@@ -604,8 +659,11 @@ IMAGE_SOURCES = (pexels_images, pixabay_images, openverse_images)
 
 
 # ---------------------------------------------------------------- खोज के शब्द
-def _query_variants(queries, anchors, generic):
+def _query_variants(queries, anchors, generic, ctx=None):
     main = anchors[0] if anchors else ""
+    women = (ctx or {}).get("gender") == "women"
+    if women and main:
+        main = f"women {main}"
     qs = []
     for q in queries or []:
         q = (q or "").strip()
@@ -620,6 +678,8 @@ def _query_variants(queries, anchors, generic):
     gen = list(generic or [])
     if not gen and main:
         gen = [f"{main} match", f"{main} crowd", f"{main} action", f"{main} team"]
+    elif women:
+        gen = [g if "women" in g.lower() else f"women {g}" for g in gen]
     random.shuffle(gen)
     seen, out = set(), []
     for q in qs[:6] + gen[:4]:
@@ -630,13 +690,13 @@ def _query_variants(queries, anchors, generic):
 
 
 # ---------------------------------------------------------------- मुख्य
-def pick_media(queries, visual_en, orient, work, i, used, want_video=True,
+def _pick_media_classic(queries, visual_en, orient, work, i, used, want_video=True,
                anchors=None, generic=None, entities=None, web_search=False,
-               library=None, category=""):
+               library=None, category="", ctx=None, block=None, tags=None):
     work = Path(work)
     anchors = [a for a in (anchors or []) if a]
     if library and category:                       # सबसे पहले अपनी लाइब्रेरी की फ़ोटो
-        m = _try_library(library, category, entities, queries, used, want_video)
+        m = _try_library(library, category, entities, queries, used, want_video, ctx, block, tags)
         if m:
             return m
     if entities:                                   # नाम वाली चीज़ हो तो पहले उसकी असली फ़ोटो
@@ -644,11 +704,11 @@ def pick_media(queries, visual_en, orient, work, i, used, want_video=True,
         if m:
             return m
         if web_search:
-            m = _try_web(entities, queries or [], anchors, work, i, used, orient)
+            m = _try_web(entities, queries or [], anchors, work, i, used, orient, ctx)
             if m:
                 return m
     anchors = [a for a in (anchors or []) if a]
-    qs = _query_variants(queries, anchors, generic)
+    qs = _query_variants(queries, anchors, generic, ctx)
     order = ("video", "image") if want_video else ("image", "video")
     for kind in order:
         sources = VIDEO_SOURCES if kind == "video" else IMAGE_SOURCES
@@ -678,5 +738,236 @@ def pick_media(queries, visual_en, orient, work, i, used, want_video=True,
                 return {"path": str(path), "kind": kind, "credit": c["credit"]}
         log(f"    {'क्लिप' if kind == 'video' else 'फ़ोटो'} नहीं मिली, दूसरा तरीका")
     if web_search:                                 # आख़िरी कोशिश: वेब सर्च
-        return _try_web([], qs, anchors, work, i, used, orient)
+        return _try_web([], qs, anchors, work, i, used, orient, ctx)
     return None
+
+
+# ================================================================ AI फ़ोटो-डायरेक्टर (Gemini देखकर चुनता है)
+def _thumb_b64(path, size=448):
+    im = Image.open(path).convert("RGB")
+    im.thumbnail((size, size))
+    buf = io.BytesIO()
+    im.save(buf, "JPEG", quality=72)
+    return base64.b64encode(buf.getvalue()).decode()
+
+
+def ai_choose(cands, ai):
+    """Gemini को उम्मीदवार फ़ोटो दिखाकर पूछता है कि सीन के लिए कौन-सी सही है।
+    लौटाता है: चुनी हुई फ़ोटो का नंबर, -1 (कोई सही नहीं), या None (Gemini नहीं चला)"""
+    key = os.environ.get("GEMINI_API_KEY", "").strip()
+    if not key or not cands:
+        return None
+    ctx = ai.get("ctx") or {}
+    fm, gd = ctx.get("format"), ctx.get("gender")
+    rules = []
+    if fm == "test":
+        rules.append("The video is about a TEST match: players must wear WHITE or cream clothes with a red ball. "
+                     "Reject coloured-kit (ODI/T20) photos.")
+    elif fm in ("odi", "t20"):
+        rules.append("The video is about a limited-overs match: players wear COLOURED kits. "
+                     "Reject photos of players in white Test clothes.")
+    if ctx and gd == "women":
+        rules.append("The video is about WOMEN's cricket: reject photos of men's teams or male players.")
+    elif ctx and gd == "men":
+        rules.append("The video is about MEN's cricket: reject photos of women's teams.")
+    text = (f'You are the photo editor of a Hindi YouTube channel "{ai.get("channel", "")}". '
+            f'Video title: {ai.get("title", "")}. Scene: {ai.get("scene", "")}. '
+            f'People/teams/places this scene is about: {", ".join(ai.get("entities") or []) or "none"}.\n'
+            "Below are candidate images (index, source/title text, then the image). Pick the ONE best image for this scene.\n"
+            "Rules:\n"
+            "- It must clearly fit what the scene is about. Be strict. If none fits, answer -1.\n"
+            "- Never try to recognise people from their faces. For named people, trust the title/source text and "
+            "clues like jersey text. If the text does not mention the person or team and you cannot tell, "
+            "treat it as not matching.\n"
+            "- Reject posters, collages, graphics, logos, screenshots, heavy watermarks, big text overlays, "
+            "blurry or dark images, and anything unrelated.\n"
+            "- Prefer sharp, real photos. If two are equally good, pick the lower index.\n"
+            + "".join(f"- {r}\n" for r in rules)
+            + 'Return ONLY JSON: {"best": <index or -1>, "reason": "<short English reason>"}')
+    parts = [{"text": text}]
+    for k, c in enumerate(cands):
+        parts.append({"text": f"Image {k}: {str(c.get('label', ''))[:160]}"})
+        parts.append({"inline_data": {"mime_type": "image/jpeg", "data": _thumb_b64(c["path"])}})
+    for model in (ai.get("models") or ["gemini-flash-latest"])[:3]:
+        think = bool(re.search(r"gemini-(2\.5|3)", model)) and "pro" not in model
+        for attempt in range(3):
+            gen = {"temperature": 0.1, "responseMimeType": "application/json", "maxOutputTokens": 300}
+            if think:
+                gen["thinkingConfig"] = {"thinkingBudget": 0}
+            try:
+                r = requests.post(
+                    f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+                    params={"key": key}, json={"contents": [{"parts": parts}], "generationConfig": gen}, timeout=120)
+            except Exception as e:
+                log(f"    [warn] Gemini फ़ोटो-जाँच नेटवर्क: {str(e)[:60]}")
+                time.sleep(5)
+                continue
+            if r.status_code in (429, 500, 502, 503, 504):
+                time.sleep(8 * (attempt + 1))
+                continue
+            if r.status_code == 404:
+                break
+            if r.status_code == 400 and think and "think" in r.text.lower():
+                think = False
+                continue
+            if r.status_code != 200:
+                log(f"    [warn] Gemini फ़ोटो-जाँच {r.status_code}: {r.text[:100]}")
+                break
+            try:
+                t = "".join(p.get("text", "") for p in r.json()["candidates"][0]["content"]["parts"])
+                d = json.loads(re.sub(r"^```(?:json)?\s*|\s*```$", "", t.strip()))
+                best = int(d.get("best", -1))
+                log(f"    🤖 Gemini ने चुना: {best} ({str(d.get('reason', ''))[:90]})")
+                time.sleep(1.5)
+                return best if 0 <= best < len(cands) else -1
+            except Exception as e:
+                log(f"    [warn] Gemini जवाब समझ नहीं आया: {str(e)[:60]}")
+                time.sleep(3)
+    return None
+
+
+def _ai_pick(queries, entities, orient, work, i, used, anchors, generic, web_search,
+             library, category, ctx, block, tags, ai):
+    """कई जगह से उम्मीदवार फ़ोटो जुटाता है, फिर Gemini से सही वाली चुनवाता है"""
+    work = Path(work)
+    cands, tried = [], [0]
+
+    def add(url, label, credit, headers=None, cid=None):
+        cid = cid or url
+        if len(cands) >= 9 or tried[0] >= 18 or cid in used or any(c["id"] == cid for c in cands):
+            return
+        tried[0] += 1
+        path = work / f"cand_{i:02d}_{len(cands)}.jpg"
+        if not _download(url, path, max_mb=25, headers=headers):
+            return
+        if not _image_ok(path, orient, relaxed=True):
+            path.unlink(missing_ok=True)
+            return
+        cands.append({"path": str(path), "label": label, "credit": credit, "id": cid})
+
+    # 1) अपनी लाइब्रेरी (3 तक)
+    if library and category:
+        tmp = set(used)
+        for _ in range(3):
+            m = _try_library(library, category, entities, queries, tmp, False, ctx, block, tags, quiet=True)
+            if not m or m["kind"] != "image":
+                break
+            cands.append({"path": m["path"], "credit": "", "id": m["path"], "library": True,
+                          "label": "from our own library, folder: " + Path(m["path"]).parent.name})
+    # 2) नाम वाली चीज़ें: Wikipedia/Commons, फिर वेब
+    fm = (ctx or {}).get("format")
+    women = (ctx or {}).get("gender") == "women"
+    for name in (entities or [])[:2]:
+        name = (name or "").strip()
+        if not name:
+            continue
+        words = [w for w in re.findall(r"[a-z]+", name.lower()) if len(w) > 2]
+        try:
+            for c in wiki_images(name)[:1] + commons_entity_images(name)[:2]:
+                add(c["url"], f"{name} - {c['credit']}", c["credit"], None, c["id"])
+            if web_search:
+                plans = []
+                if women and "women" not in name.lower():
+                    plans.append(f"{name} women")
+                if fm in ("test", "odi", "t20"):
+                    plans.append(f"{name} {fm} match")
+                plans.append(name)
+                for q in plans[:2]:
+                    for c in web_images(q, words)[:4]:
+                        add(c["url"], c["text"] or q, c["credit"], c.get("headers"), c["id"])
+        except Exception as e:
+            log(f"    [warn] नाम से फ़ोटो जुटाने में दिक्कत ({name}): {str(e)[:80]}")
+    # 3) सीन के खोज-शब्दों से (वेब + स्टॉक)
+    if len(cands) < 6:
+        for q in _query_variants(queries, anchors, generic, ctx)[:4]:
+            try:
+                if web_search:
+                    for c in web_images(q, [a.lower() for a in anchors] or None)[:3]:
+                        add(c["url"], c["text"] or q, c["credit"], c.get("headers"), c["id"])
+                for src in IMAGE_SOURCES:
+                    for c in src(q, orient):
+                        if _relevant(c, anchors, q):
+                            add(c["url"], (c.get("text") or q)[:150], c["credit"], None, c["id"])
+                            if len(cands) >= 9:
+                                break
+            except Exception as e:
+                log(f"    [warn] खोज में दिक्कत ({q}): {str(e)[:60]}")
+            if len(cands) >= 6:
+                break
+    if not cands:
+        log("    ✘ कोई उम्मीदवार फ़ोटो मिली ही नहीं")
+        return None
+    pick = ai_choose(cands, ai)
+    if pick is None:                                   # Gemini नहीं चला: पहली (लाइब्रेरी वाली) लो
+        pick = 0
+        log("    (Gemini की जाँच नहीं हो सकी, पहली फ़ोटो ली)")
+    if pick == -1:
+        log("    ✘ Gemini को कोई फ़ोटो सीन से मेल खाती नहीं लगी")
+        return None
+    c = cands[pick]
+    used.add(c["id"])
+    return {"path": c["path"], "kind": "image", "credit": c["credit"], "library": bool(c.get("library"))}
+
+
+def _frame_ok(path, work, i, ai, label):
+    """वीडियो क्लिप का एक फ़्रेम Gemini को दिखाकर पूछता है कि वह सीन के लायक है या नहीं"""
+    fr = Path(work) / f"fc_{i:02d}.jpg"
+    try:
+        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-ss", "1", "-i", str(path),
+                        "-frames:v", "1", "-q:v", "3", str(fr)], timeout=60)
+        if not fr.exists():
+            return True
+        r = ai_choose([{"path": str(fr), "label": label}], ai)
+        return r != -1
+    except Exception:
+        return True
+    finally:
+        fr.unlink(missing_ok=True)
+
+
+def _stock_video(qs, anchors, orient, work, i, used, ai, ctx):
+    for q in qs:
+        cands = []
+        for src in VIDEO_SOURCES:
+            try:
+                cands += src(q, orient)
+            except Exception as e:
+                log(f"    [warn] {src.__name__}: {str(e)[:80]}")
+        cands = [c for c in cands if c["id"] not in used and _relevant(c, anchors, q)]
+        random.shuffle(cands)
+        for c in cands[:3]:
+            path = Path(work) / f"media_{i:02d}.mp4"
+            if not _download(c["url"], path, max_mb=80) or not _video_ok(path):
+                path.unlink(missing_ok=True)
+                continue
+            if ctx and not _frame_ok(path, work, i, ai, c.get("text") or q):
+                log("    ✘ क्लिप सीन/फ़ॉर्मेट से मेल नहीं खाई, अगली देखते हैं")
+                path.unlink(missing_ok=True)
+                continue
+            used.add(c["id"])
+            log(f"    ✔ क्लिप मिली ({q}) - {c['credit']}")
+            return {"path": str(path), "kind": "video", "credit": c["credit"]}
+    return None
+
+
+def pick_media(queries, visual_en, orient, work, i, used, want_video=True,
+               anchors=None, generic=None, entities=None, web_search=False,
+               library=None, category="", ctx=None, block=None, tags=None, ai=None):
+    ai_on = bool(ai and ai.get("enabled") and os.environ.get("GEMINI_API_KEY", "").strip())
+    if not ai_on:                                      # AI बंद हो तो पुराना तरीका
+        return _pick_media_classic(queries, visual_en, orient, work, i, used, want_video, anchors, generic,
+                                   entities, web_search, library, category, ctx, block, tags)
+    anchors = [a for a in (anchors or []) if a]
+    if want_video:
+        if library and category:                       # अपनी लाइब्रेरी की क्लिप
+            m = _try_library(library, category, entities, queries, used, True, ctx, block, tags)
+            if m and m["kind"] == "video":
+                return m
+            if m:
+                used.discard(m["path"])
+        qs = _query_variants(queries, anchors, generic, ctx)
+        m = _stock_video(qs, anchors, orient, work, i, used, ai, ctx)
+        if m:
+            return m
+    return _ai_pick(queries, entities, orient, work, i, used, anchors, generic, web_search,
+                    library, category, ctx, block, tags, ai)
