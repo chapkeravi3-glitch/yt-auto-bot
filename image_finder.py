@@ -801,15 +801,21 @@ def ai_choose(cands, ai):
     text = (f'You are the photo editor of a Hindi YouTube channel "{ai.get("channel", "")}". '
             f'Video title: {ai.get("title", "")}. Scene: {ai.get("scene", "")}. '
             f'People/teams/places this scene is about: {", ".join(ai.get("entities") or []) or "none"}.\n'
-            "Below are candidate images (index, source/title text, then the image). Pick the ONE best image for this scene.\n"
-            "Rules:\n"
-            "- It must clearly fit what the scene is about. Be strict. If none fits, answer -1.\n"
-            "- Never try to recognise people from their faces. For named people, trust the title/source text and "
-            "clues like jersey text. If the text does not mention the person or team and you cannot tell, "
-            "treat it as not matching.\n"
-            "- Reject posters, collages, graphics, logos, screenshots, heavy watermarks, big text overlays, "
-            "blurry or dark images, and anything unrelated.\n"
-            "- Prefer sharp, real photos. If two are equally good, pick the lower index.\n"
+            "Below are candidate images (index, source/title text, then the image). "
+            "Pick the ONE best ACCEPTABLE image for this scene.\n"
+            "An image is acceptable when ALL of these are true:\n"
+            "- it is a sharp, real photo (NOT a poster, collage, graphic, logo, screenshot, heavy watermark, "
+            "big text overlay, blurry or very dark image);\n"
+            "- it is about the same sport/topic as the video (for a cricket video ANY cricket photo is fine: "
+            "stadium, crowd, players, bat, ball, celebration, trophy);\n"
+            "- it obeys the hard rules listed below.\n"
+            "The photo does NOT need to show the exact action described in the scene. The scene text is only "
+            "a hint: prefer the closest match, but a general photo of the right topic is fine.\n"
+            "For a named person or team: prefer a photo whose title/source text names them. If there is none, "
+            "a generic photo of the same sport is acceptable, but never one whose text clearly names someone else. "
+            "Never try to recognise people from their faces.\n"
+            "Answer -1 ONLY if every image is unrelated to the topic, breaks a hard rule, or is unusable. "
+            "If two images are equally good, pick the lower index.\n"
             + "".join(f"- {r}\n" for r in rules)
             + 'Return ONLY JSON: {"best": <index or -1>, "reason": "<short English reason>"}')
     parts = [{"text": text}]
@@ -933,19 +939,76 @@ def _ai_pick(queries, entities, orient, work, i, used, anchors, generic, web_sea
                 log(f"    [warn] खोज में दिक्कत ({q}): {str(e)[:60]}")
             if len(cands) >= 6:
                 break
+    def fallback():
+        """कुछ भी जँचा नहीं: पहले स्टेडियम की फ़ोटो, फिर general की, वरना टेक्स्ट कार्ड"""
+        p = _place_fallback(library, category, work, i, used, orient, ctx, block, tags, ai, web_search)
+        if p:
+            return p
+        if library and category:
+            g = _try_library(library, category, [], [], used, False, ctx, block, tags, quiet=True)
+            if g and g["kind"] == "image":
+                used.add(g["path"])
+                log("    ✔ आख़िरी बचाव: general फ़ोल्डर की फ़ोटो (बिना जाँच)")
+                return {"path": g["path"], "kind": "image", "credit": "", "library": True}
+        return None
+
     if not cands:
         log("    ✘ कोई उम्मीदवार फ़ोटो मिली ही नहीं")
-        return None
+        return fallback()
     pick = ai_choose(cands, ai)
     if pick is None:                                   # Gemini नहीं चला: पहली (लाइब्रेरी वाली) लो
         pick = 0
         log("    (Gemini की जाँच नहीं हो सकी, पहली फ़ोटो ली)")
     if pick == -1:
         log("    ✘ Gemini को कोई फ़ोटो सीन से मेल खाती नहीं लगी")
-        return None
+        return fallback()
     c = cands[pick]
     used.add(c["id"])
     return {"path": c["path"], "kind": "image", "credit": c["credit"], "library": bool(c.get("library"))}
+
+
+def _place_fallback(library, category, work, i, used, orient, ctx, block, tags, ai, web_search):
+    """कुछ न मिलने पर: अलग-अलग स्टेडियम (या चैनल के हिसाब से जगह) की फ़ोटो।
+    पहले आपके 'stadium' फ़ोल्डर से, फिर Wikipedia/Commons से मशहूर जगहों की फ़ोटो, फिर वेब से"""
+    folder = str((ai or {}).get("fallback_folder") or "").lower()
+    places = list((ai or {}).get("fallback_places") or [])
+    work = Path(work)
+    # 1) अपनी लाइब्रेरी का stadium फ़ोल्डर (जितने तरह के स्टेडियम डालोगे, उतनी विविधता)
+    if folder and library and category:
+        base = Path(library) / category
+        if base.is_dir():
+            files = []
+            for d in base.iterdir():
+                if d.is_dir() and folder in d.name.lower() and _guard(d.name, ctx, block, tags, True)[0]:
+                    files += [x for x in d.iterdir() if x.suffix.lower() in LIB_IMG]
+            f, kind = _lib_pick_file(files, used)
+            if f:
+                used.add(str(f))
+                log(f"    ✔ आख़िरी बचाव: {folder} फ़ोल्डर की फ़ोटो ({f.parent.name})")
+                return {"path": str(f), "kind": "image", "credit": "", "stadium": True}
+    # 2) मशहूर स्टेडियमों की मुफ़्त लाइसेंस वाली फ़ोटो
+    random.shuffle(places)
+    for name in places[:5]:
+        try:
+            cs = wiki_images(name)[:1] + commons_entity_images(name)[:2]
+            if not cs and web_search:
+                cs = web_images(f"{name} stadium", [w for w in re.findall(r"[a-z]+", name.lower()) if len(w) > 3] or None)[:3]
+        except Exception as e:
+            log(f"    [warn] {name}: {str(e)[:60]}")
+            continue
+        for c in cs:
+            if c["id"] in used:
+                continue
+            path = work / f"place_{i:02d}.jpg"
+            if not _download(c["url"], path, max_mb=25, headers=c.get("headers")):
+                continue
+            if not _image_ok(path, orient, relaxed=True):
+                path.unlink(missing_ok=True)
+                continue
+            used.add(c["id"])
+            log(f"    ✔ आख़िरी बचाव: {name} की फ़ोटो - {c['credit']}")
+            return {"path": str(path), "kind": "image", "credit": c["credit"], "stadium": True}
+    return None
 
 
 def _frame_ok(path, work, i, ai, label):
