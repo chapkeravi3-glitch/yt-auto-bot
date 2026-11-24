@@ -992,7 +992,9 @@ def _place_fallback(library, category, work, i, used, orient, ctx, block, tags, 
         try:
             cs = wiki_images(name)[:1] + commons_entity_images(name)[:2]
             if not cs and web_search:
-                cs = web_images(f"{name} stadium", [w for w in re.findall(r"[a-z]+", name.lower()) if len(w) > 3] or None)[:3]
+                suffix = str((ai or {}).get("fallback_suffix") or "")
+                cs = web_images(f"{name} {suffix}".strip(),
+                                [w for w in re.findall(r"[a-z]+", name.lower()) if len(w) > 3] or None)[:3]
         except Exception as e:
             log(f"    [warn] {name}: {str(e)[:60]}")
             continue
