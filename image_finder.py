@@ -33,6 +33,23 @@ def log(*a):
     print(*a, flush=True)
 
 
+def _i(x):
+    """चौड़ाई/ऊँचाई कभी अंक, कभी लिखावट ("1920") आती है: हमेशा पूर्णांक बना देता है"""
+    try:
+        return int(float(x))
+    except Exception:
+        return 0
+
+
+_DISABLED = set()      # जिस स्रोत की key गलत निकली, उसे इस रन में दोबारा नहीं बुलाते
+
+
+def _disable(name, why):
+    if name not in _DISABLED:
+        _DISABLED.add(name)
+        log(f"    ⚠ {name} की key गलत/बंद है ({why}); इस रन में इसे छोड़ रहे हैं")
+
+
 def _key(name):
     return os.environ.get(name, "").strip()
 
@@ -51,7 +68,11 @@ def _get_json(url, params=None, headers=None):
             if r.status_code == 200:
                 data = r.json()
             else:
-                log(f"    [{url.split('/')[2]}] {r.status_code}: {r.text[:100]}")
+                host = url.split('/')[2]
+                if r.status_code in (400, 401, 403) and ("pixabay" in host or "pexels" in host):
+                    _disable("pixabay" if "pixabay" in host else "pexels", f"{r.status_code}")
+                else:
+                    log(f"    [{host}] {r.status_code}: {r.text[:100]}")
             break
         except Exception as e:
             log(f"    [{url.split('/')[2]}] नेटवर्क दिक्कत: {str(e)[:80]}")
@@ -126,7 +147,7 @@ def _relevant(c, anchors, q):
 # cand = {"url", "id", "credit", "text"}
 def pixabay_videos(q, orient):
     k = _key("PIXABAY_API_KEY")
-    if not k:
+    if not k or "pixabay" in _DISABLED:
         return []
     d = _get_json("https://pixabay.com/api/videos/",
                   {"key": k, "q": q[:100], "per_page": 20, "safesearch": "true"})
@@ -136,7 +157,7 @@ def pixabay_videos(q, orient):
         order = ("large", "medium") if orient == "portrait" else ("medium", "large")
         for name in order:
             v = vids.get(name) or {}
-            if v.get("url") and v.get("width", 0) >= 1280:
+            if v.get("url") and _i(v.get("width")) >= 1280:
                 out.append({"url": v["url"], "id": f"pxv{h['id']}", "text": h.get("tags", ""),
                             "credit": f"वीडियो: {h.get('user', '')} / Pixabay"})
                 break
@@ -145,7 +166,7 @@ def pixabay_videos(q, orient):
 
 def pexels_videos(q, orient):
     k = _key("PEXELS_API_KEY")
-    if not k:
+    if not k or "pexels" in _DISABLED:
         return []
     d = _get_json("https://api.pexels.com/videos/search",
                   {"query": q, "per_page": 15, "orientation": orient, "size": "medium"},
@@ -166,7 +187,7 @@ def pexels_videos(q, orient):
 
 def pixabay_images(q, orient):
     k = _key("PIXABAY_API_KEY")
-    if not k:
+    if not k or "pixabay" in _DISABLED:
         return []
     d = _get_json("https://pixabay.com/api/",
                   {"key": k, "q": q[:100], "image_type": "photo", "per_page": 20,
@@ -185,7 +206,7 @@ def pixabay_images(q, orient):
 
 def pexels_images(q, orient):
     k = _key("PEXELS_API_KEY")
-    if not k:
+    if not k or "pexels" in _DISABLED:
         return []
     d = _get_json("https://api.pexels.com/v1/search",
                   {"query": q, "per_page": 15, "orientation": orient, "size": "large"},
@@ -217,7 +238,7 @@ def wiki_images(name):
             continue
         th = p.get("thumbnail") or {}
         orig = (p.get("original") or {}).get("source", "").lower()
-        if not th or "logo" in orig or orig.endswith((".svg", ".gif")) or th.get("width", 0) < 900:
+        if not th or "logo" in orig or orig.endswith((".svg", ".gif")) or _i(th.get("width")) < 900:
             continue
         out.append({"url": th["source"], "id": f"wp{p['pageid']}", "text": "",
                     "credit": f"फ़ोटो: Wikipedia/Wikimedia Commons ({p.get('title', '')})"})
@@ -241,7 +262,7 @@ def commons_entity_images(name):
             continue
         info = (p.get("imageinfo") or [{}])[0]
         u = info.get("thumburl") or info.get("url")
-        if not u or info.get("width", 0) < 1200 or u.lower().endswith((".svg", ".gif")):
+        if not u or _i(info.get("width")) < 1200 or u.lower().endswith((".svg", ".gif")):
             continue
         meta = info.get("extmetadata", {})
         yr = re.search(r"(19|20)\d\d", (meta.get("DateTimeOriginal", {}) or {}).get("value", ""))
@@ -311,7 +332,7 @@ def ddg_images(q, need_words=None):
     out = []
     for r in res:
         u = r.get("image") or ""
-        w, h = r.get("width") or 0, r.get("height") or 0
+        w, h = _i(r.get("width")), _i(r.get("height"))
         if not u or _bad_ext(u):
             continue
         if w and h and (max(w, h) < 800 or min(w, h) < 450):
@@ -357,7 +378,7 @@ def bing_images(q, need_words=None):
 def serper_images(q, need_words=None):
     """Google Images के नतीजे (serper.dev API)। GitHub के सर्वर पर भी चलता है, ऐप जैसी ही फ़ोटो मिलती हैं"""
     k = _key("SERPER_API_KEY")
-    if not k:
+    if not k or "serper" in _DISABLED:
         return []
     try:
         r = requests.post("https://google.serper.dev/images",
@@ -366,13 +387,16 @@ def serper_images(q, need_words=None):
     except Exception as e:
         log(f"    [warn] Serper ({q}): {str(e)[:80]}")
         return []
+    if r.status_code in (401, 403):
+        _disable("serper", str(r.status_code))
+        return []
     if r.status_code != 200:
         log(f"    [warn] Serper {r.status_code}: {r.text[:120]}")
         return []
     out = []
     for it in r.json().get("images", []):
         u = it.get("imageUrl") or ""
-        w, h = it.get("imageWidth") or 0, it.get("imageHeight") or 0
+        w, h = _i(it.get("imageWidth")), _i(it.get("imageHeight"))
         if not u or _bad_ext(u):
             continue
         if w and h and (max(w, h) < 800 or min(w, h) < 450):
@@ -388,9 +412,13 @@ def serper_images(q, need_words=None):
 
 def web_images(q, need_words=None):
     """वेब से फ़ोटो: DuckDuckGo + Bing दोनों (ImageSearchMan जैसा)"""
-    s = serper_images(q, need_words)
-    a = ddg_images(q, need_words)
-    b = bing_images(q, need_words)
+    def safe(fn):
+        try:
+            return fn(q, need_words)
+        except Exception as e:
+            log(f"    [warn] {fn.__name__}: {str(e)[:70]}")
+            return []
+    s, a, b = safe(serper_images), safe(ddg_images), safe(bing_images)
     log(f"    वेब सर्च '{q}': Serper {len(s)}, DuckDuckGo {len(a)}, Bing {len(b)} फ़ोटो")
     mixed = list(s)
     for x, y in zip(a, b):
@@ -444,7 +472,7 @@ def openverse_images(q, orient):
     out = []
     for r in (d or {}).get("results", []):
         u = r.get("url") or ""
-        w, h = r.get("width") or 0, r.get("height") or 0
+        w, h = _i(r.get("width")), _i(r.get("height"))
         if not u or _bad_ext(u) or (w and h and (max(w, h) < 1000 or min(w, h) < 600)):
             continue
         tags = " ".join(t.get("name", "") for t in (r.get("tags") or []))
@@ -845,15 +873,26 @@ def _ai_pick(queries, entities, orient, work, i, used, anchors, generic, web_sea
             return
         cands.append({"path": str(path), "label": label, "credit": credit, "id": cid})
 
-    # 1) अपनी लाइब्रेरी (3 तक)
+    # 1) पहले सिर्फ़ अपनी लाइब्रेरी (4 तक): Gemini को पसंद आए तो बाहर कहीं नहीं जाते
     if library and category:
-        tmp = set(used)
-        for _ in range(3):
+        tmp, lib = set(used), []
+        for _ in range(4):
             m = _try_library(library, category, entities, queries, tmp, False, ctx, block, tags, quiet=True)
             if not m or m["kind"] != "image":
                 break
-            cands.append({"path": m["path"], "credit": "", "id": m["path"], "library": True,
-                          "label": "from our own library, folder: " + Path(m["path"]).parent.name})
+            lib.append({"path": m["path"], "credit": "", "id": m["path"],
+                        "label": "from our own library, folder: " + Path(m["path"]).parent.name})
+        if lib:
+            pick = ai_choose(lib, ai)
+            if pick is None:                           # Gemini नहीं चला: लाइब्रेरी की पहली लो
+                pick = 0
+                log("    (Gemini की जाँच नहीं हो सकी, लाइब्रेरी की पहली फ़ोटो ली)")
+            if pick >= 0:
+                c = lib[pick]
+                used.add(c["id"])
+                log(f"    ✔ अपनी लाइब्रेरी से फ़ोटो पक्की ({Path(c['path']).parent.name})")
+                return {"path": c["path"], "kind": "image", "credit": "", "library": True}
+            log("    लाइब्रेरी की फ़ोटो इस सीन से मेल नहीं खाईं, अब बाहर से खोज रहे हैं")
     # 2) नाम वाली चीज़ें: Wikipedia/Commons, फिर वेब
     fm = (ctx or {}).get("format")
     women = (ctx or {}).get("gender") == "women"
