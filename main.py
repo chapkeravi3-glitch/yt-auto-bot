@@ -800,6 +800,7 @@ def main():
                                    "entities": sc.get("entities", []),
                                    "fallback_folder": ch.get("fallback_folder", ""),
                                    "fallback_places": ch.get("fallback_places", []),
+                                   "fallback_suffix": ch.get("fallback_suffix", ""),
                                    "scene": f"{sc['narration']} | visual: {sc.get('visual_en', '')}"})
         except Exception as e:
             log(f"  [warn] फ़ोटो/क्लिप खोजने में दिक्कत: {str(e)[:150]}")
