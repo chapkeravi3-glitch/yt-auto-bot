@@ -160,7 +160,7 @@ def _gemini_try(key, model, prompt, max_tokens):
     """एक मॉडल पर कोशिश। (नतीजा, कारण) लौटाता है; नतीजा None हो तो कारण देखो"""
     last = "कुछ नहीं"
     use_thinking_cfg = bool(re.search(r"gemini-(2\.5|3)", model)) and "pro" not in model
-    for attempt in range(5):
+    for attempt in range(3):
         gen = {"temperature": 0.9, "responseMimeType": "application/json",
                "maxOutputTokens": max_tokens}
         if use_thinking_cfg:
@@ -176,7 +176,7 @@ def _gemini_try(key, model, prompt, max_tokens):
             time.sleep(10)
             continue
         if r.status_code in (429, 500, 502, 503, 504):
-            wait = min(15 * 2 ** attempt, 120)
+            wait = min(10 * 2 ** attempt, 40)
             last = f"{model} {r.status_code}"
             log(f"  Gemini {model} → {r.status_code}, {wait} सेकंड रुककर दोबारा")
             time.sleep(wait)
@@ -536,18 +536,30 @@ PALETTES = [((15, 32, 80), (120, 40, 140)), ((10, 60, 70), (20, 20, 60)),
             ((70, 40, 10), (60, 15, 60))]
 
 
-def make_text_card(text, W, H, path, seed=0):
+def make_text_card(text, W, H, path, seed=0, bg=None):
     """फ़ोटो/क्लिप न मिलने पर: रंगीन बैकग्राउंड पर बड़े अक्षरों में कैप्शन।
     यह फ़ोटो की तरह चलता है, इसलिए build_scene में अपने-आप ज़ूम-इन/ज़ूम-आउट हो जाता है"""
+    if bg:                                             # फ़ोटो को पीछे लगाकर, थोड़ा गहरा करके
+        try:
+            base = ImageEnhance.Brightness(cover(Image.open(bg).convert("RGB"), W, H)).enhance(0.5)
+        except Exception:
+            base, bg = None, None
+    if bg and (not CAPTIONS_OK or not text):
+        base.save(path, quality=94)
+        return
     if not CAPTIONS_OK or not text:
         gradient_image(path, W, H)
         return
-    c1, c2 = PALETTES[seed % len(PALETTES)]
-    im = Image.new("RGB", (W, H))
-    d = ImageDraw.Draw(im)
-    for y in range(H):
-        t = y / H
-        d.line([(0, y), (W, y)], fill=tuple(int(c1[k] + (c2[k] - c1[k]) * t) for k in range(3)))
+    if bg:
+        im = base
+        d = ImageDraw.Draw(im)
+    else:
+        c1, c2 = PALETTES[seed % len(PALETTES)]
+        im = Image.new("RGB", (W, H))
+        d = ImageDraw.Draw(im)
+        for y in range(H):
+            t = y / H
+            d.line([(0, y), (W, y)], fill=tuple(int(c1[k] + (c2[k] - c1[k]) * t) for k in range(3)))
     size = int(W * 0.13) if H > W else int(H * 0.14)
     while True:
         font = ImageFont.truetype(FONT, size, layout_engine=ImageFont.Layout.RAQM)
@@ -769,6 +781,7 @@ def main():
     used_ids, credits, scene_files, first_img = set(), [], [], None
     clip_count = 0
     card_count = 0
+    stadium_count = 0
     for i, sc in enumerate(s["scenes"]):
         log(f"[सीन {i + 1}/{len(s['scenes'])}] {sc['narration'][:50]}...")
         dur = durs[i]
@@ -785,10 +798,21 @@ def main():
                                   {"enabled": cfg.get("ai_photo_director", True), "models": models,
                                    "ctx": ctx, "channel": ch["name"], "title": s["title"],
                                    "entities": sc.get("entities", []),
+                                   "fallback_folder": ch.get("fallback_folder", ""),
+                                   "fallback_places": ch.get("fallback_places", []),
                                    "scene": f"{sc['narration']} | visual: {sc.get('visual_en', '')}"})
         except Exception as e:
             log(f"  [warn] फ़ोटो/क्लिप खोजने में दिक्कत: {str(e)[:150]}")
             media = None
+        if media and media.get("stadium"):                # स्टेडियम की फ़ोटो पर बड़े अक्षर, ज़ूम के साथ
+            g = WORK / f"card_{i:02d}.jpg"
+            try:
+                make_text_card(sc.get("caption") or sc["narration"][:40], W, H, g, i, bg=media["path"])
+                media = {"path": str(g), "kind": "image", "credit": media.get("credit", ""),
+                         "textcard": True, "stadium": True}
+                stadium_count += 1
+            except Exception as e:
+                log(f"  [warn] स्टेडियम पर टेक्स्ट नहीं बना: {str(e)[:100]}")
         if not media:
             log("  कुछ नहीं मिला, बड़े अक्षरों वाला ज़ूम टेक्स्ट कार्ड लगा रहे हैं")
             g = WORK / f"card_{i:02d}.jpg"
@@ -829,7 +853,7 @@ def main():
                 gradient_image(g, W, H)
                 scene_files.append(build_scene(i, {"path": str(g), "kind": "image"}, dur, W, H, None))
 
-    log(f"  कुल क्लिप: {clip_count} / सीन: {len(s['scenes'])} | टेक्स्ट कार्ड वाले सीन: {card_count}")
+    log(f"  कुल क्लिप: {clip_count} / सीन: {len(s['scenes'])} | टेक्स्ट कार्ड वाले सीन: {card_count} | स्टेडियम बैकग्राउंड: {stadium_count}")
     if card_count > len(s["scenes"]) // 2:
         log("⚠ आधे से ज़्यादा सीन में फ़ोटो/क्लिप नहीं मिली: ऊपर की 🔎 लाइनें देखो, कोई स्रोत बंद है")
     stamp = datetime.utcnow().strftime("%Y%m%d_%H%M")
